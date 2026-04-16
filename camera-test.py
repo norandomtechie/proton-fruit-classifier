@@ -1,0 +1,133 @@
+import cv2
+import usb.core
+import usb.util
+import time
+import logging
+import sys
+import os
+import glob
+
+# Configure logging to console
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+
+# Constants for the custom camera
+VENDOR_ID = 0xcafe
+PRODUCT_ID = 0x4007
+
+def find_video_device():
+    """Find the /dev/videoX index for our USB VID:PID."""
+    for devpath in sorted(glob.glob('/sys/class/video4linux/video*')):
+        devname = os.path.basename(devpath)
+        # Follow the device symlink to find the USB device
+        try:
+            uevent_path = os.path.join(devpath, 'device', '..', '..', 'uevent')
+            uevent_path = os.path.realpath(uevent_path)
+            if not os.path.exists(uevent_path):
+                # Try alternate path for different sysfs layouts
+                uevent_path = os.path.join(devpath, 'device', 'uevent')
+            with open(uevent_path) as f:
+                uevent = f.read()
+            # Look through parent directories for idVendor/idProduct
+        except Exception:
+            pass
+
+        # Check idVendor/idProduct in parent USB device
+        try:
+            realpath = os.path.realpath(devpath)
+            # Walk up to find the USB device with idVendor/idProduct
+            parts = realpath.split('/')
+            for i in range(len(parts), 2, -1):
+                parent = '/'.join(parts[:i])
+                vid_path = os.path.join(parent, 'idVendor')
+                pid_path = os.path.join(parent, 'idProduct')
+                if os.path.exists(vid_path) and os.path.exists(pid_path):
+                    with open(vid_path) as f:
+                        vid = int(f.read().strip(), 16)
+                    with open(pid_path) as f:
+                        pid = int(f.read().strip(), 16)
+                    if vid == VENDOR_ID and pid == PRODUCT_ID:
+                        idx = int(devname.replace('video', ''))
+                        logging.info(f"Found device at /dev/{devname} (index {idx})")
+                        return idx
+        except Exception:
+            continue
+
+    return None
+
+def is_device_present():
+    """Checks the USB bus for the specific VID/PID."""
+    device = usb.core.find(idVendor=VENDOR_ID, idProduct=PRODUCT_ID)
+    return device is not None
+
+def main():
+    cap = None
+    device_active = False
+
+    logging.info(f"Starting monitor for device {hex(VENDOR_ID)}:{hex(PRODUCT_ID)}...")
+
+    try:
+        while True:
+            present = is_device_present()
+
+            # Case 1: Device was just reconnected
+            if present and not device_active:
+                logging.info("Device detected! Waiting for OS to initialize driver...")
+                time.sleep(2.0)  # Buffer for the OS to create the device node
+                
+                video_idx = find_video_device()
+                if video_idx is None:
+                    logging.error("USB device present but no /dev/videoX found for it. Retrying...")
+                    time.sleep(1.0)
+                    continue
+
+                cap = cv2.VideoCapture(video_idx)
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 160)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 120)
+                if cap.isOpened():
+                    logging.info(f"Stream opened successfully on /dev/video{video_idx}.")
+                    device_active = True
+                else:
+                    logging.error(f"Failed to open VideoCapture on /dev/video{video_idx}. Retrying...")
+                    cap.release()
+                    cap.release()
+
+            # Case 2: Device was disconnected
+            elif not present and device_active:
+                logging.warning("Device lost. Closing stream and cleaning up...")
+                if cap:
+                    cap.release()
+                cv2.destroyAllWindows()
+                device_active = False
+
+            # Case 3: Streaming mode
+            if device_active and cap:
+                ret, frame = cap.read()
+                if ret:
+                    cv2.imshow(f"OV7670 UVC - {hex(VENDOR_ID)}:{hex(PRODUCT_ID)}", frame)
+                    # Press 'q' in the window to exit the script
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        logging.info("User requested exit.")
+                        break
+                else:
+                    logging.error("Failed to grab frame. Checking hardware status...")
+                    # This often happens during "soft" disconnects
+                    device_active = False
+                    cap.release()
+
+            # Idle polling interval to save CPU
+            time.sleep(0.1)
+
+    except KeyboardInterrupt:
+        logging.info("Monitoring stopped by user.")
+    finally:
+        if cap:
+            cap.release()
+        cv2.destroyAllWindows()
+        logging.info("Cleanup complete.")
+
+if __name__ == "__main__":
+    main()

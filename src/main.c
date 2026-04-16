@@ -1,0 +1,401 @@
+#include <stdio.h>
+#include <string.h>
+#include "pico/stdlib.h"
+#include "pico/multicore.h"
+#include "hardware/i2c.h"
+#include "hardware/dma.h"
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
+#include "hardware/irq.h"
+#include "tusb.h"
+#include "usb_descriptors.h"
+#include "ov7670_regs.h"
+#include "camera_capture.pio.h"
+
+// --- Pin Definitions ---
+#define PIN_D0      0
+#define PIN_PCLK    8
+#define PIN_HREF    9
+#define PIN_VSYNC   10
+#define PIN_SDA     12
+#define PIN_SCL     13
+#define PIN_RESET   14
+#define PIN_PWDN    15
+#define PIN_XCLK    21
+
+#define CAM_I2C     i2c0
+
+// --- Frame buffer ---
+#define FRAME_BYTES (FRAME_WIDTH * FRAME_HEIGHT * 2)  // YUY2: 2 bytes/pixel
+#define DMA_XFER_COUNT (FRAME_BYTES / 4)              // 32-bit transfers
+
+static uint8_t frame_buf[2][FRAME_BYTES];
+static volatile uint8_t capture_buf_idx = 0;  // which buffer DMA is writing to
+static volatile bool frame_ready = false;      // a completed frame is available
+static volatile uint8_t ready_buf_idx = 0;     // which buffer has the completed frame
+
+// --- PIO / DMA ---
+static PIO cam_pio = pio0;
+static uint cam_sm = 0;
+static int dma_chan = -1;
+
+// --- UVC state ---
+static unsigned tx_busy = 0;
+static unsigned frame_num = 0;
+static unsigned interval_ms = 1000 / FRAME_RATE;
+
+// --- Debug counters ---
+static volatile uint32_t dbg_vsync_fall = 0;
+static volatile uint32_t dbg_vsync_rise = 0;
+static volatile uint32_t dbg_frames_sent = 0;
+static volatile uint32_t dbg_frames_ready = 0;
+
+// =====================================================================
+// I2C / SCCB helpers
+// =====================================================================
+static int cam_write_reg(uint8_t reg, uint8_t val) {
+    uint8_t buf[2] = {reg, val};
+    int ret = i2c_write_blocking(CAM_I2C, OV7670_ADDR, buf, 2, false);
+    if (ret < 0) {
+        printf("I2C write error: reg=0x%02X val=0x%02X ret=%d\n", reg, val, ret);
+    }
+    sleep_us(300);
+    return ret;
+}
+
+static uint8_t cam_read_reg(uint8_t reg) {
+    uint8_t val = 0;
+    int ret = i2c_write_blocking(CAM_I2C, OV7670_ADDR, &reg, 1, false);  // SCCB: STOP between write and read
+    if (ret < 0) {
+        printf("I2C read setup error: reg=0x%02X ret=%d\n", reg, ret);
+        return 0;
+    }
+    ret = i2c_read_blocking(CAM_I2C, OV7670_ADDR, &val, 1, false);
+    if (ret < 0) {
+        printf("I2C read error: reg=0x%02X ret=%d\n", reg, ret);
+        return 0;
+    }
+    return val;
+}
+
+static void i2c_bus_scan(void) {
+    printf("I2C bus scan:\n");
+    bool found = false;
+    for (int addr = 0x08; addr < 0x78; addr++) {
+        uint8_t dummy;
+        int ret = i2c_read_blocking(CAM_I2C, addr, &dummy, 1, false);
+        if (ret >= 0) {
+            printf("  Found device at 0x%02X\n", addr);
+            found = true;
+        }
+    }
+    if (!found) {
+        printf("  No devices found!\n");
+    }
+}
+
+static void cam_write_list(const ov7670_reg_t *list) {
+    for (int i = 0; list[i].reg <= OV7670_REG_LAST; i++) {
+        cam_write_reg(list[i].reg, list[i].val);
+        sleep_ms(1);
+    }
+}
+
+// =====================================================================
+// OV7670 frame control for QQVGA (from usedbytes driver)
+// =====================================================================
+static void cam_frame_control_qqvga(void) {
+    // QQVGA = SIZE_DIV4 (index 2): vstart=11, hstart=186, edge_offset=2, pclk_delay=2
+    uint8_t size = 2; // DIV4
+    uint8_t vstart = 11;
+    uint16_t hstart = 186;
+    uint8_t edge_offset = 2;
+    uint8_t pclk_delay = 2;
+
+    // Enable downsampling
+    uint8_t com3_val = OV7670_COM3_DCWEN;
+    cam_write_reg(OV7670_REG_COM3, com3_val);
+
+    // PCLK division: 0x18 + size for sub-VGA
+    uint8_t com14_val = 0x18 + size;
+    cam_write_reg(OV7670_REG_COM14, com14_val);
+
+    // Downsample ratio
+    uint8_t dcwctr_val = size * 0x11;
+    cam_write_reg(OV7670_REG_SCALING_DCWCTR, dcwctr_val);
+
+    // Pixel clock divider
+    uint8_t pclk_div_val = 0xF0 + size;
+    cam_write_reg(OV7670_REG_SCALING_PCLK_DIV, pclk_div_val);
+
+    // Digital zoom
+    uint8_t zoom = 0x20; // 1.0x for DIV4
+    uint8_t xsc = cam_read_reg(OV7670_REG_SCALING_XSC);
+    uint8_t ysc = cam_read_reg(OV7670_REG_SCALING_YSC);
+    xsc = (xsc & 0x80) | zoom;
+    ysc = (ysc & 0x80) | zoom;
+    cam_write_reg(OV7670_REG_SCALING_XSC, xsc);
+    cam_write_reg(OV7670_REG_SCALING_YSC, ysc);
+
+    // Window registers
+    uint16_t vstop = vstart + 480;
+    uint16_t hstop = (hstart + 640) % 784;
+    cam_write_reg(OV7670_REG_HSTART, hstart >> 3);
+    cam_write_reg(OV7670_REG_HSTOP,  hstop >> 3);
+    cam_write_reg(OV7670_REG_HREF,   (edge_offset << 6) | ((hstop & 0x07) << 3) | (hstart & 0x07));
+    cam_write_reg(OV7670_REG_VSTART, vstart >> 2);
+    cam_write_reg(OV7670_REG_VSTOP,  vstop >> 2);
+    cam_write_reg(OV7670_REG_VREF,   ((vstop & 0x03) << 2) | (vstart & 0x03));
+    cam_write_reg(OV7670_REG_SCALING_PCLK_DELAY, pclk_delay);
+}
+
+// =====================================================================
+// Camera initialization
+// =====================================================================
+static bool cam_init(void) {
+    // I2C at 100 kHz - init FIRST before XCLK so pins are configured
+    i2c_init(CAM_I2C, 100 * 1000);
+    gpio_set_function(PIN_SDA, GPIO_FUNC_I2C);
+    gpio_set_function(PIN_SCL, GPIO_FUNC_I2C);
+    gpio_pull_up(PIN_SDA);
+    gpio_pull_up(PIN_SCL);
+    printf("I2C0 initialized on SDA=GPIO%d SCL=GPIO%d\n", PIN_SDA, PIN_SCL);
+
+    // PWDN low (enable camera), RESET low (hold in reset)
+    gpio_init(PIN_PWDN);
+    gpio_set_dir(PIN_PWDN, GPIO_OUT);
+    gpio_put(PIN_PWDN, 0);
+
+    gpio_init(PIN_RESET);
+    gpio_set_dir(PIN_RESET, GPIO_OUT);
+    gpio_put(PIN_RESET, 0);
+    sleep_ms(10);
+
+    // Setup XCLK: ~12.5 MHz from sys_clk (150 MHz / 12)
+    uint32_t sys_clk = clock_get_hz(clk_sys);
+    printf("System clock: %lu Hz\n", sys_clk);
+    clock_gpio_init(PIN_XCLK, CLOCKS_CLK_GPOUT0_CTRL_AUXSRC_VALUE_CLK_SYS, 12);
+    printf("XCLK started on GPIO%d (~%lu Hz)\n", PIN_XCLK, sys_clk / 12);
+
+    // XCLK must be running before releasing reset
+    sleep_ms(10);
+
+    // Release reset
+    gpio_put(PIN_RESET, 1);
+    sleep_ms(500);  // OV7670 needs time after reset with XCLK running
+
+    printf("Camera power sequence complete (PWDN=0, RESET=1)\n");
+
+    // Scan I2C bus
+    i2c_bus_scan();
+
+    // Read PID - expect 0x76
+    uint8_t pid = cam_read_reg(OV7670_REG_PID);
+    printf("OV7670 PID: 0x%02X (expect 0x76)\n", pid);
+    if (pid != 0x76) {
+        printf("ERROR: OV7670 not detected!\n");
+        printf("Check: XCLK->GPIO%d, SDA->GPIO%d, SCL->GPIO%d, "
+               "RESET->GPIO%d, PWDN->GPIO%d, D0-D7->GPIO%d-%d\n",
+               PIN_XCLK, PIN_SDA, PIN_SCL, PIN_RESET, PIN_PWDN,
+               PIN_D0, PIN_D0+7);
+        return false;
+    }
+
+    uint8_t midh = cam_read_reg(OV7670_REG_MIDH);
+    printf("OV7670 MIDH: 0x%02X (expect 0x7F)\n", midh);
+
+    // Soft reset
+    cam_write_reg(OV7670_REG_COM7, OV7670_COM7_RESET);
+    sleep_ms(1000);
+
+    // Clock config: internal prescaler
+    cam_write_reg(OV7670_REG_CLKRC, 1);        // CLK * 4
+    cam_write_reg(OV7670_REG_DBLV, 1 << 6);    // PLL x4
+
+    // Set YUV output format
+    cam_write_list(ov7670_yuv_regs);
+
+    // Write main init table
+    cam_write_list(ov7670_init_regs);
+
+    // Set QQVGA frame size
+    cam_frame_control_qqvga();
+
+    sleep_ms(300); // settling time
+
+    printf("OV7670 configured for QQVGA YUV422\n");
+    return true;
+}
+
+// =====================================================================
+// DMA restart - called on VSYNC to begin capturing next frame
+// =====================================================================
+static void dma_restart(void) {
+    dma_channel_abort(dma_chan);
+
+    // Drain any stale data from PIO RX FIFO
+    while (!pio_sm_is_rx_fifo_empty(cam_pio, cam_sm)) {
+        pio_sm_get(cam_pio, cam_sm);
+    }
+
+    dma_channel_set_write_addr(dma_chan, frame_buf[capture_buf_idx], false);
+    dma_channel_set_trans_count(dma_chan, DMA_XFER_COUNT, true);
+}
+
+// =====================================================================
+// VSYNC GPIO interrupt handler
+// =====================================================================
+static void vsync_isr(uint gpio, uint32_t events) {
+    if (gpio != PIN_VSYNC) return;
+
+    if (events & GPIO_IRQ_EDGE_FALL) {
+        dbg_vsync_fall++;
+        dma_restart();
+    }
+    if (events & GPIO_IRQ_EDGE_RISE) {
+        dbg_vsync_rise++;
+        dbg_frames_ready++;
+        ready_buf_idx = capture_buf_idx;
+        frame_ready = true;
+        capture_buf_idx ^= 1;
+    }
+}
+
+// =====================================================================
+// PIO + DMA setup
+// =====================================================================
+static void capture_init(void) {
+    // Load PIO program
+    uint offset = pio_add_program(cam_pio, &camera_capture_program);
+    camera_capture_program_init(cam_pio, cam_sm, offset, PIN_D0, PIN_PCLK, PIN_HREF);
+
+    // DMA channel
+    dma_chan = dma_claim_unused_channel(true);
+    dma_channel_config cfg = dma_channel_get_default_config(dma_chan);
+    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_32);
+    channel_config_set_read_increment(&cfg, false);
+    channel_config_set_write_increment(&cfg, true);
+    channel_config_set_dreq(&cfg, pio_get_dreq(cam_pio, cam_sm, false));
+
+    dma_channel_configure(dma_chan, &cfg,
+        frame_buf[0],                        // write address
+        &cam_pio->rxf[cam_sm],               // read address (PIO RX FIFO)
+        DMA_XFER_COUNT,                      // transfer count
+        false                                // don't start yet
+    );
+
+    // VSYNC interrupt
+    gpio_init(PIN_VSYNC);
+    gpio_set_dir(PIN_VSYNC, GPIO_IN);
+    gpio_set_irq_enabled_with_callback(PIN_VSYNC,
+        GPIO_IRQ_EDGE_FALL | GPIO_IRQ_EDGE_RISE, true, vsync_isr);
+
+    // Start PIO state machine
+    pio_sm_set_enabled(cam_pio, cam_sm, true);
+    printf("PIO + DMA capture initialized\n");
+}
+
+// =====================================================================
+// UVC video streaming
+// =====================================================================
+static void video_send_frame(void) {
+    static unsigned start_ms = 0;
+    static unsigned already_sent = 0;
+
+    if (!tud_video_n_streaming(0, 0)) {
+        already_sent = 0;
+        frame_num = 0;
+        return;
+    }
+
+    if (!already_sent) {
+        already_sent = 1;
+        start_ms = to_ms_since_boot(get_absolute_time());
+    }
+
+    unsigned cur = to_ms_since_boot(get_absolute_time());
+    if (cur - start_ms < interval_ms) return;
+    if (tx_busy) return;
+
+    start_ms += interval_ms;
+
+    if (frame_ready) {
+        frame_ready = false;
+        tx_busy = 1;
+        dbg_frames_sent++;
+        tud_video_n_frame_xfer(0, 0, (void*)frame_buf[ready_buf_idx], FRAME_BYTES);
+    }
+}
+
+void tud_video_frame_xfer_complete_cb(uint_fast8_t ctl_idx, uint_fast8_t stm_idx) {
+    (void)ctl_idx;
+    (void)stm_idx;
+    tx_busy = 0;
+    frame_num++;
+}
+
+int tud_video_commit_cb(uint_fast8_t ctl_idx, uint_fast8_t stm_idx,
+                        video_probe_and_commit_control_t const *parameters) {
+    (void)ctl_idx;
+    (void)stm_idx;
+    interval_ms = parameters->dwFrameInterval / 10000;
+    return VIDEO_ERROR_NONE;
+}
+
+// =====================================================================
+// USB callbacks
+// =====================================================================
+void tud_mount_cb(void) {
+    printf("USB mounted\n");
+}
+
+void tud_umount_cb(void) {
+    printf("USB unmounted\n");
+}
+
+void tud_suspend_cb(bool remote_wakeup_en) {
+    (void)remote_wakeup_en;
+}
+
+void tud_resume_cb(void) {
+}
+
+// =====================================================================
+// Main
+// =====================================================================
+int main(void) {
+    stdio_init_all();
+    sleep_ms(2000); // let CDC connect
+
+    printf("\n=== OV7670 UVC Camera ===\n");
+
+    // Initialize camera
+    if (!cam_init()) {
+        printf("Camera init failed, halting.\n");
+        while (1) { tight_loop_contents(); }
+    }
+
+    // Initialize PIO + DMA capture
+    capture_init();
+
+    printf("Entering main loop...\n");
+
+    uint32_t last_status = 0;
+    while (1) {
+        tud_task();
+        video_send_frame();
+
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        if (now - last_status >= 2000) {
+            last_status = now;
+            uint32_t dma_remaining = dma_channel_hw_addr(dma_chan)->transfer_count;
+            printf("VSYNC f/r=%lu/%lu ready=%lu sent=%lu "
+                   "tx_busy=%u streaming=%d dma_rem=%lu buf[0..3]=%02X %02X %02X %02X\n",
+                   dbg_vsync_fall, dbg_vsync_rise, dbg_frames_ready, dbg_frames_sent,
+                   tx_busy, tud_video_n_streaming(0, 0), dma_remaining,
+                   frame_buf[ready_buf_idx][0], frame_buf[ready_buf_idx][1],
+                   frame_buf[ready_buf_idx][2], frame_buf[ready_buf_idx][3]);
+        }
+    }
+}

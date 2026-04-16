@@ -1,0 +1,56 @@
+;
+; PIO program for OV7670 8-bit parallel pixel capture
+; Reads 8 data bits (GPIO 0-7) on each PCLK rising edge while HREF is high.
+; Autopush every 32 bits (4 bytes = 2 YUY2 pixels).
+;
+
+.program camera_capture
+
+.wrap_target
+wait_href:
+    wait 1 gpio 9       ; Wait for HREF high (active line)
+pixel_loop:
+    wait 1 gpio 8       ; Wait for PCLK rising edge
+    in pins, 8           ; Read 8 data bits from GPIO 0-7
+    wait 0 gpio 8       ; Wait for PCLK to go low
+    jmp pin pixel_loop   ; If HREF still high, keep reading pixels
+                          ; If HREF low, fall through to wrap -> wait_href
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+#include "hardware/gpio.h"
+
+static inline void camera_capture_program_init(PIO pio, uint sm, uint offset,
+                                                uint data_base_pin, uint pclk_pin,
+                                                uint href_pin) {
+    pio_sm_config c = camera_capture_program_get_default_config(offset);
+
+    // Set input pins: data bus starts at data_base_pin (8 consecutive pins)
+    sm_config_set_in_pins(&c, data_base_pin);
+
+    // JMP pin is HREF for the conditional jump
+    sm_config_set_jmp_pin(&c, href_pin);
+
+    // Shift ISR to the right, autopush every 32 bits
+    sm_config_set_in_shift(&c, true, true, 32);
+
+    // Configure all data pins as inputs
+    for (uint i = 0; i < 8; i++) {
+        pio_gpio_init(pio, data_base_pin + i);
+    }
+    pio_sm_set_consecutive_pindirs(pio, sm, data_base_pin, 8, false);
+
+    // Configure PCLK and HREF as inputs
+    pio_gpio_init(pio, pclk_pin);
+    pio_gpio_init(pio, href_pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pclk_pin, 1, false);
+    pio_sm_set_consecutive_pindirs(pio, sm, href_pin, 1, false);
+
+    // No clock divider - run at full system clock
+    sm_config_set_clkdiv(&c, 1.0f);
+
+    // Load config and start
+    pio_sm_init(pio, sm, offset, &c);
+}
+%}
