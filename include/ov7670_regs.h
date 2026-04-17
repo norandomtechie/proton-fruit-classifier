@@ -165,6 +165,7 @@ static const ov7670_reg_t ov7670_yuv_regs[] = {
 // Main init table (from Adafruit/usedbytes OV7670 driver)
 static const ov7670_reg_t ov7670_init_regs[] = {
     {OV7670_REG_TSLB,  0x04},  // TSLB: YUYV output order (bit3=0 for YUYV/YUY2)
+    {OV7670_REG_COM13, 0xC1},  // COM13: gamma enable + UV auto + UV swap (fix blue tint)
     {OV7670_REG_SLOP,  0x20},
     // Gamma curve
     {OV7670_REG_GAM_BASE + 0,  0x1C},
