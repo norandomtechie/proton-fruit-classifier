@@ -2,17 +2,17 @@
 """
 Train a small fruit classification CNN and export as quantized TFLite model + C array.
 
-Target: RP2350B (520 KB SRAM) with OV7670 camera (160x120 YUY2).
-Model input: 48x48 grayscale INT8 (small enough for ~70-100 KB arena).
-Classes: apple, banana, orange, background (4 classes).
+Target: RP2350B (520 KB SRAM, 16 MB flash) with OV7670 camera (160x120 YUY2).
+Model input: 64x64 RGB INT8 (3 channels).
+Classes: apple, banana, strawberry, background (4 classes).
 
 Usage:
-    pip install tensorflow numpy Pillow
+    pip install tensorflow numpy Pillow kagglehub
     python train_fruit_model.py
 
 The script will:
-1. Download Fruits-360 dataset from Kaggle (or use synthetic data for testing)
-2. Train a small CNN
+1. Download Fruits-360 dataset from Kaggle via kagglehub
+2. Train a CNN with data augmentation
 3. Quantize to INT8
 4. Export as C header file (include/fruit_model.h)
 """
@@ -29,59 +29,75 @@ from tensorflow import keras
 from tensorflow.keras import layers
 
 # --- Configuration ---
-IMG_SIZE = 48          # Model input: 48x48
+IMG_SIZE = 64          # Model input: 64x64
 NUM_CLASSES = 4        # apple, banana, orange, background
 BATCH_SIZE = 32
-EPOCHS = 20
+EPOCHS = 50
 MODEL_PATH = "fruit_model.tflite"
 HEADER_PATH = os.path.join(os.path.dirname(__file__), "include", "fruit_model.h")
 
-CLASS_NAMES = ["apple", "banana", "orange", "background"]
+CLASS_NAMES = ["apple", "banana", "strawberry", "background"]
 
-# Fruits-360 class folder names (subset)
-FRUIT360_CLASSES = {
-    "apple":  ["Apple Braeburn", "Apple Golden 1", "Apple Golden 2", "Apple Golden 3",
-               "Apple Granny Smith", "Apple Red 1", "Apple Red 2", "Apple Red 3",
-               "Apple Red Delicious", "Apple Red Yellow 1"],
-    "banana": ["Banana", "Banana Lady Finger", "Banana Red"],
-    "orange": ["Orange"],
+# Fruits-360 class folder name prefixes (case-insensitive match)
+FRUIT360_PREFIXES = {
+    "apple":  ["apple"],
+    "banana": ["banana"],
+    "strawberry": ["strawberry"],
 }
 
 
 def build_model():
-    """Build a tiny CNN suitable for MCU deployment."""
+    """Build a CNN suitable for MCU deployment with more capacity."""
     model = keras.Sequential([
-        # Input: 48x48x1 grayscale
-        layers.Input(shape=(IMG_SIZE, IMG_SIZE, 1)),
+        # Input: 64x64x3 RGB (color needed to distinguish orange from apple)
+        layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
 
-        # Block 1: 16 filters
-        layers.Conv2D(16, 3, padding='same', use_bias=False),
+        # Block 1: 24 filters
+        layers.Conv2D(24, 3, padding='same', use_bias=False),
         layers.BatchNormalization(),
         layers.ReLU(),
-        layers.MaxPooling2D(2),  # -> 24x24
+        layers.MaxPooling2D(2),  # -> 32x32
 
-        # Block 2: 32 filters
-        layers.Conv2D(32, 3, padding='same', use_bias=False),
-        layers.BatchNormalization(),
-        layers.ReLU(),
-        layers.MaxPooling2D(2),  # -> 12x12
-
-        # Block 3: 48 filters
+        # Block 2: 48 filters
         layers.Conv2D(48, 3, padding='same', use_bias=False),
         layers.BatchNormalization(),
         layers.ReLU(),
-        layers.MaxPooling2D(2),  # -> 6x6
+        layers.MaxPooling2D(2),  # -> 16x16
 
-        # Block 4: 64 filters
+        # Block 3: 64 filters
         layers.Conv2D(64, 3, padding='same', use_bias=False),
         layers.BatchNormalization(),
         layers.ReLU(),
-        layers.GlobalAveragePooling2D(),  # -> 64
+        layers.MaxPooling2D(2),  # -> 8x8
 
-        # Classifier
+        # Block 4: 96 filters
+        layers.Conv2D(96, 3, padding='same', use_bias=False),
+        layers.BatchNormalization(),
+        layers.ReLU(),
+        layers.GlobalAveragePooling2D(),  # -> 96
+
+        # Classifier — no softmax; use logits for better INT8 quantization
         layers.Dense(NUM_CLASSES),
     ])
     return model
+
+
+def download_fruits360():
+    """Download Fruits-360 dataset via kagglehub."""
+    import kagglehub
+    print("Downloading Fruits-360 dataset via kagglehub...")
+    path = kagglehub.dataset_download("moltean/fruits")
+    print(f"  Dataset downloaded to: {path}")
+    return path
+
+
+def find_training_dir(base_dir):
+    """Find the Training directory within the Fruits-360 dataset."""
+    for root, dirs, files in os.walk(base_dir):
+        if os.path.basename(root) == "Training":
+            return root
+    # Fallback: look for fruit class folders directly
+    return base_dir
 
 
 def load_fruits360(data_dir):
@@ -89,22 +105,32 @@ def load_fruits360(data_dir):
     images = []
     labels = []
 
-    train_dir = os.path.join(data_dir, "Training")
-    if not os.path.isdir(train_dir):
-        # Try flat structure
-        train_dir = data_dir
+    train_dir = find_training_dir(data_dir)
+    print(f"  Using training dir: {train_dir}")
 
-    for class_idx, (class_name, folder_names) in enumerate(FRUIT360_CLASSES.items()):
-        for folder in folder_names:
+    # List available folders for debugging
+    if os.path.isdir(train_dir):
+        available = sorted(os.listdir(train_dir))
+        print(f"  Available folders ({len(available)}): {available[:10]}...")
+
+    for class_idx, (class_name, prefixes) in enumerate(FRUIT360_PREFIXES.items()):
+        # Find all folders matching any prefix for this class
+        matching_folders = []
+        for folder_name in sorted(os.listdir(train_dir)):
+            folder_lower = folder_name.lower().replace('_', ' ')
+            if any(folder_lower.startswith(p) for p in prefixes):
+                matching_folders.append(folder_name)
+        print(f"  {class_name}: found {len(matching_folders)} folders: {matching_folders}")
+
+        for folder in matching_folders:
             folder_path = os.path.join(train_dir, folder)
             if not os.path.isdir(folder_path):
-                print(f"  Warning: {folder_path} not found, skipping")
                 continue
             for fname in os.listdir(folder_path):
                 fpath = os.path.join(folder_path, fname)
                 try:
                     img = tf.io.read_file(fpath)
-                    img = tf.image.decode_image(img, channels=1)
+                    img = tf.image.decode_image(img, channels=3)
                     img = tf.image.resize(img, [IMG_SIZE, IMG_SIZE])
                     images.append(img.numpy())
                     labels.append(class_idx)
@@ -112,12 +138,58 @@ def load_fruits360(data_dir):
                     continue
         print(f"  Loaded {class_name}: {sum(1 for l in labels if l == class_idx)} images")
 
-    # Generate "background" class from random crops / noise
-    n_bg = min(len(images) // 3, 500)
+    if len(images) == 0:
+        print("ERROR: No fruit images loaded! Check dataset path.")
+        sys.exit(1)
+
+    # Balance classes by capping the largest class
+    max_per_class = 2000
+    images_arr = images
+    labels_arr = labels
+    balanced_images = []
+    balanced_labels = []
+    for cls_idx in range(len(FRUIT360_PREFIXES)):
+        cls_imgs = [img for img, lbl in zip(images_arr, labels_arr) if lbl == cls_idx]
+        if len(cls_imgs) > max_per_class:
+            indices = np.random.choice(len(cls_imgs), max_per_class, replace=False)
+            cls_imgs = [cls_imgs[i] for i in indices]
+        balanced_images.extend(cls_imgs)
+        balanced_labels.extend([cls_idx] * len(cls_imgs))
+    images = balanced_images
+    labels = balanced_labels
+    print(f"  After balancing (max {max_per_class}/class): {len(images)} fruit images")
+
+    # Generate "background" class from diverse non-fruit content (3-channel)
+    n_bg = min(len(images) // 3, 1500)
     print(f"  Generating {n_bg} background samples")
-    for _ in range(n_bg):
-        # Random noise images as background
-        bg = np.random.randint(0, 256, (IMG_SIZE, IMG_SIZE, 1), dtype=np.uint8).astype(np.float32)
+    for i in range(n_bg):
+        choice = i % 5
+        if choice == 0:
+            # Uniform color
+            bg = np.random.randint(0, 256, (1, 1, 3)).astype(np.float32)
+            bg = np.broadcast_to(bg, (IMG_SIZE, IMG_SIZE, 3)).copy()
+        elif choice == 1:
+            # Random noise
+            bg = np.random.randint(0, 256, (IMG_SIZE, IMG_SIZE, 3)).astype(np.float32)
+        elif choice == 2:
+            # Gradient
+            grad = np.linspace(0, 255, IMG_SIZE).reshape(-1, 1, 1)
+            bg = np.broadcast_to(grad, (IMG_SIZE, IMG_SIZE, 3)).astype(np.float32).copy()
+            bg += np.random.randn(IMG_SIZE, IMG_SIZE, 3).astype(np.float32) * 20
+        elif choice == 3:
+            # Edges / high-frequency pattern
+            bg = np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
+            bg[::2, :, :] = 255.0
+        else:
+            # Random rectangles
+            base_color = np.random.randint(50, 200, (3,)).astype(np.float32)
+            bg = np.ones((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32) * base_color
+            for _ in range(np.random.randint(1, 5)):
+                x1, y1 = np.random.randint(0, IMG_SIZE, 2)
+                x2, y2 = np.random.randint(0, IMG_SIZE, 2)
+                x1, x2 = min(x1, x2), max(x1, x2)
+                y1, y2 = min(y1, y2), max(y1, y2)
+                bg[y1:y2, x1:x2, :] = np.random.randint(0, 256, (3,))
         images.append(bg)
         labels.append(3)  # background
 
@@ -126,34 +198,43 @@ def load_fruits360(data_dir):
     return images, labels
 
 
-def generate_synthetic_data(n_per_class=200):
-    """Generate synthetic data for testing when Fruits-360 isn't available."""
-    print("Generating synthetic training data (no Fruits-360 found)...")
-    images = []
-    labels = []
+def augment(image, label):
+    """Apply aggressive augmentations to bridge Fruits-360 → real camera domain gap."""
+    # --- Background replacement ---
+    # Fruits-360 has white backgrounds (~1.0 after /255); replace with random values
+    # so the model can't rely on background color.
+    # For RGB: white = all channels bright
+    bg_mask = tf.cast(tf.reduce_min(image, axis=-1, keepdims=True) > 0.92, tf.float32)
+    bg_val = tf.random.uniform([], 0.0, 0.7)
+    bg_noise = tf.random.normal(tf.shape(image), stddev=0.08)
+    random_bg = tf.clip_by_value(bg_val + bg_noise, 0.0, 1.0)
+    image = image * (1.0 - bg_mask) + random_bg * bg_mask
 
-    for class_idx in range(NUM_CLASSES):
-        for _ in range(n_per_class):
-            img = np.random.randn(IMG_SIZE, IMG_SIZE, 1).astype(np.float32)
-            # Add class-specific patterns so the model can learn something
-            if class_idx == 0:  # apple - circular bright region
-                y, x = np.ogrid[:IMG_SIZE, :IMG_SIZE]
-                mask = ((x - IMG_SIZE//2)**2 + (y - IMG_SIZE//2)**2) < (IMG_SIZE//3)**2
-                img[mask] += 2.0
-            elif class_idx == 1:  # banana - elongated region
-                img[IMG_SIZE//3:2*IMG_SIZE//3, IMG_SIZE//6:5*IMG_SIZE//6] += 2.0
-            elif class_idx == 2:  # orange - circular, different texture
-                y, x = np.ogrid[:IMG_SIZE, :IMG_SIZE]
-                mask = ((x - IMG_SIZE//2)**2 + (y - IMG_SIZE//2)**2) < (IMG_SIZE//4)**2
-                img[mask] += 1.5
-                img += np.random.randn(IMG_SIZE, IMG_SIZE, 1).astype(np.float32) * 0.3
-            # class 3 = background (just noise)
+    # --- Random scale/position ---
+    # Pad the image then resize back to simulate fruit at different distances.
+    # This teaches the model that fruit can be small in the frame.
+    pad = tf.random.uniform([], 0, 20, dtype=tf.int32)
+    bg_pad_val = tf.random.uniform([], 0.0, 0.5)
+    padded = tf.pad(image, [[pad, pad], [pad, pad], [0, 0]],
+                    constant_values=bg_pad_val)
+    image = tf.image.resize(padded, [IMG_SIZE, IMG_SIZE])
 
-            img = (img - img.min()) / (img.max() - img.min() + 1e-8)
-            images.append(img)
-            labels.append(class_idx)
+    # --- Standard augmentations ---
+    image = tf.image.random_brightness(image, 0.4)
+    image = tf.image.random_contrast(image, 0.5, 1.5)
+    image = tf.image.random_saturation(image, 0.5, 1.5)
+    image = tf.image.random_hue(image, 0.08)
+    k = tf.random.uniform([], 0, 4, dtype=tf.int32)
+    image = tf.image.rot90(image, k=k)
+    image = tf.image.random_flip_left_right(image)
+    image = tf.image.random_flip_up_down(image)
 
-    return np.array(images, dtype=np.float32), np.array(labels, dtype=np.int32)
+    # --- Gaussian noise (simulate OV7670 sensor noise) ---
+    noise = tf.random.normal(tf.shape(image), stddev=0.06)
+    image = image + noise
+
+    image = tf.clip_by_value(image, 0.0, 1.0)
+    return image, label
 
 
 def quantize_model(model, representative_data):
@@ -183,7 +264,7 @@ def export_c_header(tflite_model, header_path):
         f.write("#ifndef FRUIT_MODEL_H_\n")
         f.write("#define FRUIT_MODEL_H_\n\n")
         f.write(f"// Auto-generated by train_fruit_model.py\n")
-        f.write(f"// Model input: {IMG_SIZE}x{IMG_SIZE} grayscale INT8\n")
+        f.write(f"// Model input: {IMG_SIZE}x{IMG_SIZE} RGB INT8 (3 channels)\n")
         f.write(f"// Classes: {', '.join(CLASS_NAMES)}\n")
         f.write(f"// Model size: {len(tflite_model)} bytes\n\n")
         f.write(f"#define FRUIT_MODEL_INPUT_SIZE {IMG_SIZE}\n")
@@ -215,22 +296,23 @@ def export_c_header(tflite_model, header_path):
 
 def main():
     print(f"=== Fruit Classification Model Training ===")
-    print(f"Input: {IMG_SIZE}x{IMG_SIZE} grayscale, {NUM_CLASSES} classes")
+    print(f"Input: {IMG_SIZE}x{IMG_SIZE} RGB, {NUM_CLASSES} classes")
     print()
 
-    # Try to load Fruits-360, fall back to synthetic
-    fruits360_dir = os.environ.get("FRUITS360_DIR", "fruits-360")
-    if os.path.isdir(fruits360_dir):
-        print(f"Loading Fruits-360 from {fruits360_dir}...")
-        images, labels = load_fruits360(fruits360_dir)
+    # Download Fruits-360 via kagglehub or use local path
+    fruits360_dir = os.environ.get("FRUITS360_DIR", "")
+    if fruits360_dir and os.path.isdir(fruits360_dir):
+        print(f"Using local Fruits-360 at {fruits360_dir}")
     else:
-        print(f"Fruits-360 not found at '{fruits360_dir}'.")
-        print("Set FRUITS360_DIR env var or download from:")
-        print("  https://www.kaggle.com/datasets/moltean/fruits")
-        print()
-        images, labels = generate_synthetic_data(n_per_class=300)
+        fruits360_dir = download_fruits360()
+
+    print(f"Loading Fruits-360...")
+    images, labels = load_fruits360(fruits360_dir)
 
     print(f"\nDataset: {len(images)} images")
+    for i, name in enumerate(CLASS_NAMES):
+        count = np.sum(labels == i)
+        print(f"  {name}: {count}")
 
     # Shuffle and split
     indices = np.random.permutation(len(images))
@@ -242,6 +324,14 @@ def main():
     print(f"Train: {len(train_x)}, Val: {len(val_x)}")
     print()
 
+    # Build augmented training dataset
+    train_ds = tf.data.Dataset.from_tensor_slices((train_x, train_y))
+    train_ds = train_ds.shuffle(len(train_x)).map(augment, num_parallel_calls=tf.data.AUTOTUNE)
+    train_ds = train_ds.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+
+    val_ds = tf.data.Dataset.from_tensor_slices((val_x, val_y))
+    val_ds = val_ds.batch(BATCH_SIZE).prefetch(tf.data.AUTOTUNE)
+
     # Build and train
     model = build_model()
     model.compile(
@@ -252,16 +342,27 @@ def main():
     model.summary()
     print()
 
+    # Compute class weights to handle imbalance
+    from sklearn.utils.class_weight import compute_class_weight
+    class_weights_arr = compute_class_weight('balanced', classes=np.unique(train_y), y=train_y)
+    class_weight = {i: w for i, w in enumerate(class_weights_arr)}
+    print(f"Class weights: {class_weight}")
+
+    # LR schedule: reduce on plateau
+    lr_callback = keras.callbacks.ReduceLROnPlateau(
+        monitor='val_loss', factor=0.5, patience=3, min_lr=1e-5, verbose=1)
+
     model.fit(
-        train_x, train_y,
-        validation_data=(val_x, val_y),
-        batch_size=BATCH_SIZE,
+        train_ds,
+        validation_data=val_ds,
         epochs=EPOCHS,
+        callbacks=[lr_callback],
+        class_weight=class_weight,
         verbose=1,
     )
 
     # Evaluate
-    val_loss, val_acc = model.evaluate(val_x, val_y, verbose=0)
+    val_loss, val_acc = model.evaluate(val_ds, verbose=0)
     print(f"\nValidation accuracy: {val_acc:.3f}")
 
     # Quantize

@@ -475,11 +475,13 @@ int main(void) {
                    tx_busy, tud_video_n_streaming(0, 0), dma_remaining);
 
             if (ml_result_ready) {
-                printf("ML: %s (score=%d) infer=%lu us count=%lu\n",
+                printf("ML: %s (score=%d) infer=%lu us count=%lu scores=[%d,%d,%d,%d]\n",
                        ml_last_result.class_name,
                        ml_last_result.confidence,
                        fruit_classifier_get_inference_time_us(),
-                       ml_inference_count);
+                       ml_inference_count,
+                       ml_last_result.scores[0], ml_last_result.scores[1],
+                       ml_last_result.scores[2], ml_last_result.scores[3]);
             }
         }
     }

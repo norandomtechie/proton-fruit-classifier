@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 // Model input dimensions
-#define FRUIT_INPUT_SIZE   48
+#define FRUIT_INPUT_SIZE   64
 #define FRUIT_NUM_CLASSES  4
 
 // Classification result
@@ -17,6 +17,7 @@ typedef struct {
     int class_id;           // 0=apple, 1=banana, 2=orange, 3=background
     const char *class_name; // human-readable label
     int8_t confidence;      // raw INT8 output score (higher = more confident)
+    int8_t scores[FRUIT_NUM_CLASSES]; // all class scores for debugging
 } fruit_result_t;
 
 // Initialize the TF Lite interpreter. Call once at startup.
