@@ -107,7 +107,8 @@ def main():
             if device_active and cap:
                 ret, frame = cap.read()
                 if ret:
-                    cv2.imshow(f"OV7670 UVC - {hex(VENDOR_ID)}:{hex(PRODUCT_ID)}", frame)
+                    larger_img = cv2.resize(frame, None, fx=4.0, fy=4.0, interpolation=cv2.INTER_CUBIC)
+                    cv2.imshow(f"OV7670 UVC - {hex(VENDOR_ID)}:{hex(PRODUCT_ID)}", larger_img)
                     # Press 'q' in the window to exit the script
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         logging.info("User requested exit.")

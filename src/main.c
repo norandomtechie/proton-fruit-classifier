@@ -46,6 +46,9 @@ static int dma_chan = -1;
 // --- UVC state ---
 static volatile unsigned tx_busy = 0;
 static unsigned frame_num = 0;
+static unsigned already_sent = 0;
+static unsigned interval_ms = 1000 / FRAME_RATE;
+static uint32_t tx_start_ms = 0;  // when current transfer started
 
 // --- Debug counters ---
 static volatile uint32_t dbg_vsync_fall = 0;
@@ -314,29 +317,56 @@ static void capture_init(void) {
 // =====================================================================
 // UVC video streaming
 // =====================================================================
+
+// Pick a frame buffer to send — prefer the latest ready buffer,
+// but always have *something* even if no new frame arrived yet.
+static uint8_t pick_send_buf(void) {
+    uint32_t save = save_and_disable_interrupts();
+    uint8_t idx = ready_buf_idx;
+    frame_ready = false;
+    restore_interrupts(save);
+    return idx;
+}
+
 static void video_send_frame(void) {
     if (!tud_video_n_streaming(0, 0)) {
+        already_sent = 0;
         frame_num = 0;
+        tx_busy = 0;
+        return;
+    }
+
+    // Timeout: if tx_busy stuck for >500ms, force-clear it
+    if (tx_busy) {
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+        if (now - tx_start_ms > 500) {
+            tx_busy = 0;
+        }
+    }
+
+    // First frame: send immediately when streaming starts
+    if (!already_sent) {
+        already_sent = 1;
+        tx_busy = 1;
+        tx_start_ms = to_ms_since_boot(get_absolute_time());
+        uint8_t idx = pick_send_buf();
+        dbg_frames_sent++;
+        if (!tud_video_n_frame_xfer(0, 0, (void*)frame_buf[idx], FRAME_BYTES)) {
+            tx_busy = 0;
+        }
         return;
     }
 
     if (tx_busy) return;
     if (!frame_ready) return;
 
-    // Critical section: atomically grab ready buffer and set tx_busy
-    // to prevent VSYNC ISR from swapping buffers between these steps
-    uint32_t save = save_and_disable_interrupts();
-    if (!frame_ready || tx_busy) {
-        restore_interrupts(save);
-        return;
-    }
-    uint8_t idx = ready_buf_idx;
-    frame_ready = false;
     tx_busy = 1;
-    restore_interrupts(save);
-
+    tx_start_ms = to_ms_since_boot(get_absolute_time());
+    uint8_t idx = pick_send_buf();
     dbg_frames_sent++;
-    tud_video_n_frame_xfer(0, 0, (void*)frame_buf[idx], FRAME_BYTES);
+    if (!tud_video_n_frame_xfer(0, 0, (void*)frame_buf[idx], FRAME_BYTES)) {
+        tx_busy = 0;
+    }
 }
 
 void tud_video_frame_xfer_complete_cb(uint_fast8_t ctl_idx, uint_fast8_t stm_idx) {
@@ -350,7 +380,13 @@ int tud_video_commit_cb(uint_fast8_t ctl_idx, uint_fast8_t stm_idx,
                         video_probe_and_commit_control_t const *parameters) {
     (void)ctl_idx;
     (void)stm_idx;
-    (void)parameters;
+    // Read the negotiated frame interval (in 100ns units) and convert to ms
+    interval_ms = parameters->dwFrameInterval / 10000;
+    if (interval_ms < 10) interval_ms = 10;  // Clamp to reasonable minimum
+    // Reset streaming state for new session
+    frame_num = 0;
+    tx_busy = 0;
+    already_sent = 0;
     return VIDEO_ERROR_NONE;
 }
 
@@ -443,6 +479,10 @@ int main(void) {
         tud_task();
         video_send_frame();
 
+        // Keep calling tud_task() frequently — do NOT let printf or
+        // other work starve the USB stack.
+        tud_task();
+
         uint32_t now = to_ms_since_boot(get_absolute_time());
 
         // Report Core 1 ML init status once
@@ -456,9 +496,6 @@ int main(void) {
         }
 
         // Dispatch a frame to Core 1 for classification every ~500ms.
-        // Don't gate on frame_ready — video_send_frame() already consumed it.
-        // Instead, use ready_buf_idx directly; the buffer stays valid until
-        // the next VSYNC swap (which won't happen while tx_busy or ml reading).
         if (now - last_ml_frame >= 500 && !ml_frame_pending
             && ml_init_status == 1 && dbg_frames_ready > 0) {
             ml_buf_idx = ready_buf_idx;
@@ -466,22 +503,27 @@ int main(void) {
             last_ml_frame = now;
         }
 
-        if (now - last_status >= 2000) {
+        // Only print status when CDC is connected, and less frequently
+        // during active streaming to avoid stalling the main loop.
+        uint32_t status_interval = tud_video_n_streaming(0, 0) ? 5000 : 2000;
+        if (now - last_status >= status_interval) {
             last_status = now;
-            uint32_t dma_remaining = dma_channel_hw_addr(dma_chan)->transfer_count;
-            printf("VSYNC f/r=%lu/%lu ready=%lu sent=%lu "
-                   "tx_busy=%u streaming=%d dma_rem=%lu\n",
-                   dbg_vsync_fall, dbg_vsync_rise, dbg_frames_ready, dbg_frames_sent,
-                   tx_busy, tud_video_n_streaming(0, 0), dma_remaining);
+            if (tud_cdc_connected()) {
+                uint32_t dma_remaining = dma_channel_hw_addr(dma_chan)->transfer_count;
+                printf("VSYNC f/r=%lu/%lu ready=%lu sent=%lu "
+                       "tx_busy=%u streaming=%d dma_rem=%lu\n",
+                       dbg_vsync_fall, dbg_vsync_rise, dbg_frames_ready, dbg_frames_sent,
+                       tx_busy, tud_video_n_streaming(0, 0), dma_remaining);
 
-            if (ml_result_ready) {
-                printf("ML: %s (score=%d) infer=%lu us count=%lu scores=[%d,%d,%d,%d]\n",
-                       ml_last_result.class_name,
-                       ml_last_result.confidence,
-                       fruit_classifier_get_inference_time_us(),
-                       ml_inference_count,
-                       ml_last_result.scores[0], ml_last_result.scores[1],
-                       ml_last_result.scores[2], ml_last_result.scores[3]);
+                if (ml_result_ready) {
+                    printf("ML: %s (score=%d) infer=%lu us count=%lu scores=[%d,%d,%d,%d]\n",
+                           ml_last_result.class_name,
+                           ml_last_result.confidence,
+                           fruit_classifier_get_inference_time_us(),
+                           ml_inference_count,
+                           ml_last_result.scores[0], ml_last_result.scores[1],
+                           ml_last_result.scores[2], ml_last_result.scores[3]);
+                }
             }
         }
     }

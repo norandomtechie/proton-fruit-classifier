@@ -48,7 +48,7 @@ extern "C" {
 // Class: Video (UVC)
 #define CFG_TUD_VIDEO            1
 #define CFG_TUD_VIDEO_STREAMING  1
-#define CFG_TUD_VIDEO_STREAMING_EP_BUFSIZE 256
+#define CFG_TUD_VIDEO_STREAMING_EP_BUFSIZE 512
 #define CFG_TUD_VIDEO_STREAMING_BULK 1
 
 // Class: CDC (debug printf)

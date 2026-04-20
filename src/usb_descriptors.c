@@ -45,7 +45,7 @@ uint8_t const* tud_descriptor_device_cb(void) {
         TUD_VIDEO_DESC_CS_VS_FRM_UNCOMPR_CONT(1, 0, _width, _height, \
             _width * _height * 16, _width * _height * 16 * _fps, \
             _width * _height * 16 / 8, \
-            (10000000/_fps), (10000000/_fps), (10000000/_fps)*_fps, (10000000/_fps)), \
+            (10000000/_fps), (10000000/_fps), 10000000, (10000000/_fps)), \
         TUD_VIDEO_DESC_CS_VS_COLOR_MATCHING(VIDEO_COLOR_PRIMARIES_BT709, VIDEO_COLOR_XFER_CH_BT709, VIDEO_COLOR_COEF_SMPTE170M), \
         TUD_VIDEO_DESC_EP_BULK(_epin, _epsize, 1)
 

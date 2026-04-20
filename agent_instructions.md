@@ -1,0 +1,1 @@
+Always reuse the existing terminal for all commands. Do not create new terminals.
