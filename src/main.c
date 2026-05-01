@@ -442,6 +442,10 @@ static void core1_ml_entry(void) {
     }
 }
 
+void hd44780_init();
+void hd44780_display_line1(const char *text);
+void hd44780_display_line2(const char *text);
+
 // =====================================================================
 // Main (Core 0: camera + USB + dispatch to Core 1)
 // =====================================================================
@@ -450,6 +454,12 @@ int main(void) {
     vreg_set_voltage(VREG_VOLTAGE_1_20);
     sleep_ms(10);
     set_sys_clock_khz(250000, true);
+
+    // Initialize LCD
+    sleep_ms(100);
+    hd44780_init();
+    hd44780_display_line1("Hi! I'm Proton!");
+    hd44780_display_line2("I identify fruit");
 
     stdio_init_all();
     sleep_ms(2000); // let CDC connect
@@ -463,6 +473,10 @@ int main(void) {
         while (1) { tight_loop_contents(); }
     }
 
+    hd44780_display_line1("My camera is");
+    hd44780_display_line2("initialized!");
+    sleep_ms(1000);
+
     // Initialize PIO + DMA capture
     capture_init();
 
@@ -470,10 +484,11 @@ int main(void) {
     multicore_launch_core1(core1_ml_entry);
     printf("Core 1 launched for ML inference\n");
 
-    printf("Entering main loop...\n");
+    printf("Entering main loop...\n"); 
 
     uint32_t last_status = 0;
     uint32_t last_ml_frame = 0;
+    uint32_t last_lcd_update = 0;
     bool ml_init_reported = false;
     while (1) {
         tud_task();
@@ -489,6 +504,8 @@ int main(void) {
         if (!ml_init_reported && ml_init_status != 0) {
             if (ml_init_status == 1) {
                 printf("[Core1] Fruit classifier initialized OK\n");
+                hd44780_display_line1("Fruit classifier");
+                hd44780_display_line2("has started!");
             } else {
                 printf("[Core1] ERROR: classifier init FAILED\n");
             }
@@ -514,17 +531,24 @@ int main(void) {
                        "tx_busy=%u streaming=%d dma_rem=%lu\n",
                        dbg_vsync_fall, dbg_vsync_rise, dbg_frames_ready, dbg_frames_sent,
                        tx_busy, tud_video_n_streaming(0, 0), dma_remaining);
-
-                if (ml_result_ready) {
-                    printf("ML: %s (score=%d) infer=%lu us count=%lu scores=[%d,%d,%d,%d]\n",
-                           ml_last_result.class_name,
-                           ml_last_result.confidence,
-                           fruit_classifier_get_inference_time_us(),
-                           ml_inference_count,
-                           ml_last_result.scores[0], ml_last_result.scores[1],
-                           ml_last_result.scores[2], ml_last_result.scores[3]);
-                }
             }
+        }
+
+        if (ml_result_ready && (now - last_lcd_update >= 300)) {
+            char buf[16];
+            sprintf(buf, "%s (%d)",
+                ml_last_result.class_name,
+                ml_last_result.confidence);
+            hd44780_display_line1(buf);
+            printf("%s\n", buf);
+            sprintf(buf, "[%d,%d,%d,%d]",
+                ml_last_result.scores[0], ml_last_result.scores[1],
+                ml_last_result.scores[2], ml_last_result.scores[3]);
+            hd44780_display_line2(buf);
+            printf("%s\n", buf);
+
+            ml_result_ready = false;
+            last_lcd_update = now;
         }
     }
 }

@@ -19,7 +19,8 @@ VENDOR_ID = 0xcafe
 PRODUCT_ID = 0x4007
 
 def find_video_device():
-    """Find the /dev/videoX index for our USB VID:PID."""
+    """Find candidate /dev/videoX nodes for our USB VID:PID."""
+    matches = []
     for devpath in sorted(glob.glob('/sys/class/video4linux/video*')):
         devname = os.path.basename(devpath)
         # Follow the device symlink to find the USB device
@@ -50,13 +51,32 @@ def find_video_device():
                     with open(pid_path) as f:
                         pid = int(f.read().strip(), 16)
                     if vid == VENDOR_ID and pid == PRODUCT_ID:
-                        idx = int(devname.replace('video', ''))
-                        logging.info(f"Found device at /dev/{devname} (index {idx})")
-                        return idx
+                        node = f"/dev/{devname}"
+                        matches.append(node)
         except Exception:
             continue
 
-    return None
+    return matches
+
+
+def open_matching_device():
+    """Open the first working V4L2 device node for our VID:PID."""
+    candidates = find_video_device()
+    if not candidates:
+        return None, None
+
+    for node in candidates:
+        logging.info(f"Trying camera node {node}")
+        cap = cv2.VideoCapture(node, cv2.CAP_V4L2)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'YUYV'))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 160)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 120)
+        if cap.isOpened():
+            logging.info(f"Stream opened successfully on {node}.")
+            return cap, node
+        cap.release()
+
+    return None, None
 
 def is_device_present():
     """Checks the USB bus for the specific VID/PID."""
@@ -78,22 +98,20 @@ def main():
                 logging.info("Device detected! Waiting for OS to initialize driver...")
                 time.sleep(2.0)  # Buffer for the OS to create the device node
                 
-                video_idx = find_video_device()
-                if video_idx is None:
+                candidates = find_video_device()
+                if not candidates:
                     logging.error("USB device present but no /dev/videoX found for it. Retrying...")
                     time.sleep(1.0)
                     continue
+                logging.info(f"Found candidate nodes: {', '.join(candidates)}")
 
-                cap = cv2.VideoCapture(video_idx)
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 160)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 120)
-                if cap.isOpened():
-                    logging.info(f"Stream opened successfully on /dev/video{video_idx}.")
+                cap, opened_node = open_matching_device()
+                if cap and cap.isOpened():
                     device_active = True
                 else:
-                    logging.error(f"Failed to open VideoCapture on /dev/video{video_idx}. Retrying...")
-                    cap.release()
-                    cap.release()
+                    logging.error("Failed to open any matching V4L2 camera node. Retrying...")
+                    if cap:
+                        cap.release()
 
             # Case 2: Device was disconnected
             elif not present and device_active:
