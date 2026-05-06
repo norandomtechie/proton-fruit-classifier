@@ -66,7 +66,7 @@ Use 3.3 V power and 3.3 V logic for the camera.  Add 10k pullups on the I2C pins
 | SCL / SIOC | 13 | I2C clock |
 | RESET | 14 | Active-low reset |
 | PWDN | 15 | Power-down control |
-| XCLK | 21 | Camera master clock from Proton |
+| XCLK | 23 | Camera master clock from Proton |
 | 3V3 | Any 3V3 pin | Camera power |
 | GND | Any GND pin | Common ground |
 
@@ -74,7 +74,7 @@ Use 3.3 V power and 3.3 V logic for the camera.  Add 10k pullups on the I2C pins
 
 | LCD Pin/Signal | Proton GPIO | Notes |
 |---|---:|---|
-| RS | 26 | Register select |
+| RS | 31 | Register select |
 | RW | 24 | Read/write (firmware drives low for writes) |
 | E (EN) | 25 | Enable strobe |
 | D4 | 27 | Data bit 4 |

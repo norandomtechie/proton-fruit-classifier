@@ -5,7 +5,7 @@
 
 #define RW 24
 #define EN 25
-#define RS 26
+#define RS 31
 #define DB4 27
 #define DB5 28
 #define DB6 29

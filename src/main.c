@@ -25,7 +25,7 @@
 #define PIN_SCL     13
 #define PIN_RESET   14
 #define PIN_PWDN    15
-#define PIN_XCLK    21
+#define PIN_XCLK    23
 
 #define CAM_I2C     i2c0
 
