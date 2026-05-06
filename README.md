@@ -41,6 +41,61 @@ The data flow works as follows:
 - Meanwhile, every 500 ms, the firmware sends the latest frame to the second CPU core, where the fruit classifier model runs inference. The on-device preprocessing converts the YUV422 camera data to 64×64 RGB, quantizes it to INT8, and feeds it through a 4-layer CNN - all without any network connection or cloud service. The classification result (e.g., "apple", confidence score) is printed over the serial port.
 - In parallel, the LCD is updated with human-readable status: startup banners, camera/classifier readiness, and periodic inference output (class and score line, then raw score vector line).
 
+## How to Set It Up
+
+This section summarizes the exact wiring from the OV7670 camera and HD44780 LCD to the Proton board.
+
+### OV7670 Camera to Proton
+
+Use 3.3 V power and 3.3 V logic for the camera.  Add 10k pullups on the I2C pins SCL and SDA.
+
+| OV7670 Signal | Proton GPIO | Notes |
+|---|---:|---|
+| D0 | 0 | Pixel data bit 0 |
+| D1 | 1 | Pixel data bit 1 |
+| D2 | 2 | Pixel data bit 2 |
+| D3 | 3 | Pixel data bit 3 |
+| D4 | 4 | Pixel data bit 4 |
+| D5 | 5 | Pixel data bit 5 |
+| D6 | 6 | Pixel data bit 6 |
+| D7 | 7 | Pixel data bit 7 |
+| PCLK | 8 | Pixel clock |
+| HREF | 9 | Horizontal reference |
+| VSYNC | 10 | Vertical sync |
+| SDA / SIOD | 12 | I2C data |
+| SCL / SIOC | 13 | I2C clock |
+| RESET | 14 | Active-low reset |
+| PWDN | 15 | Power-down control |
+| XCLK | 21 | Camera master clock from Proton |
+| 3V3 | Any 3V3 pin | Camera power |
+| GND | Any GND pin | Common ground |
+
+### HD44780 LCD to Proton (4-bit mode)
+
+| LCD Pin/Signal | Proton GPIO | Notes |
+|---|---:|---|
+| RS | 26 | Register select |
+| RW | 24 | Read/write (firmware drives low for writes) |
+| E (EN) | 25 | Enable strobe |
+| D4 | 27 | Data bit 4 |
+| D5 | 28 | Data bit 5 |
+| D6 | 29 | Data bit 6 |
+| D7 | 30 | Data bit 7 |
+| VSS | GND | Ground |
+| VDD | 5V | Power pin |
+| VO | GND | Contrast pin |
+| A (LED+) | 5V | Typically to supply through resistor (module-dependent) |
+| K (LED-) | GND | Ground |
+
+### Bring-Up Checklist
+
+1. Connect all grounds first (Proton, OV7670, LCD).
+2. Wire OV7670 data/sync/control pins exactly as in the table above.
+3. Confirm XCLK is connected to GPIO 21.
+4. Wire the LCD in 4-bit mode (only D4-D7 are used).
+5. Adjust LCD contrast on VO until text is visible.
+6. Flash firmware and verify LCD startup messages appear.
+
 ## USB Video Class (UVC) and Serial Port (USB CDC)
 
 ### UVC - USB Video Class
