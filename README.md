@@ -91,7 +91,7 @@ Use 3.3 V power and 3.3 V logic for the camera.  Add 10k pullups on the I2C pins
 
 1. Connect all grounds first (Proton, OV7670, LCD).
 2. Wire OV7670 data/sync/control pins exactly as in the table above.
-3. Confirm XCLK is connected to GPIO 21.
+3. Confirm XCLK is connected to GPIO 23.
 4. Wire the LCD in 4-bit mode (only D4-D7 are used).
 5. Adjust LCD contrast on VO until text is visible.
 6. Flash firmware and verify LCD startup messages appear.
