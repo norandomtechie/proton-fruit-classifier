@@ -255,13 +255,19 @@ The system clock is set to 250 MHz (up from the default 150 MHz) by raising the 
 
 ### Memory Layout
 
-| Region | Size | Usage |
+RAM and flash should be accounted separately. The model blob (`fruit_model_data`) is linked into flash and does not consume SRAM like the tensor arena does.
+
+| SRAM Region | Size | Usage |
 |--------|------|-------|
 | Frame buffers | 76,800 bytes | 2× 38,400-byte YUY2 frame buffers for double-buffering |
 | TF Lite arena | 327,680 bytes | Tensor allocation for the ML model (100×100 input model) |
-| Model weights | ~106 KB | Quantized INT8 neural network stored in flash, loaded to RAM |
-| Stack + other | ~25 KB | USB buffers, variables, stacks for both cores |
-| **Total RAM** | **~430 KB / 520 KB** | **~82.7% utilization** |
+| `resized_image` buffer | 30,000 bytes | 100×100×3 INT8 preprocessed input scratch buffer |
+| Stack + other | ~25 KB | USB buffers, globals, and stacks for both cores |
+| **Total SRAM (estimated)** | **~459 KB / 520 KB** | **~88.3% utilization** |
+
+| Flash Region | Size | Usage |
+|--------|------|-------|
+| Model weights (`fruit_model_data`) | ~106 KB | Quantized INT8 neural network stored in flash |
 
 ## Software Components
 
