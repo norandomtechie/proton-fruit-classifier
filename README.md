@@ -361,15 +361,14 @@ The fruit classifier is an on-device machine learning model that identifies obje
 
 Ctrl-Click on each image to see the full size image in a new browser tab when you're giving it a try!
 
-<div style="display: flex; gap: 20px; flex-wrap: wrap;">
-   <a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/apple.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/apple.png" width="200"></a>  
+<a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/apple.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/apple.png" width="200"></a>  
 
-   <a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/banana.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/banana.png" width="200"></a>  
+<a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/banana.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/banana.png" width="200"></a>  
 
-   <a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/lime.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/lime.png" width="200"></a>  
+<a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/lime.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/lime.png" width="200"></a>  
 
-   <a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/blueberry.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/blueberry.png" width="200"></a>  
-</div>
+<a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/blueberry.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/blueberry.png" width="200"></a>  
+
 
 ### Why On-Device ML?
 
