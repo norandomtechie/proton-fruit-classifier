@@ -359,13 +359,15 @@ See the [Fruit Classifier](#fruit-classifier) section below for full details on 
 
 The fruit classifier is an on-device machine learning model that identifies objects in the camera's view in real time, entirely on the microcontroller with no internet connection. It classifies each frame into one of four categories: **apple**, **banana**, **lime**, or **blueberry**.
 
-<img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/apple.png>" width="200">  
+Ctrl-Click on each image to see the full size image in a new browser tab when you're giving it a try!
 
-<img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/banana.png>" width="200">  
+<a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/apple.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/apple.png" width="200"></a>  
 
-<img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/lime.png>" width="200">  
+<a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/banana.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/banana.png" width="200"></a>  
 
-<img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/blueberry.png>" width="200">  
+<a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/lime.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/lime.png" width="200"></a>  
+
+<a href="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/blueberry.png"><img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/blueberry.png" width="200"></a>  
 
 
 ### Why On-Device ML?
