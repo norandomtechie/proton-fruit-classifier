@@ -9,7 +9,7 @@
 
 This project turns a small, inexpensive camera module (the OV7670) into a USB webcam that works on Windows, macOS, and Linux - no special drivers or software needed. When you plug the device into your computer, it shows up as a regular camera, just like any other webcam you might buy. You can open it with any camera app (such as Zoom, OBS, Google Meet, or the built-in Camera app on your OS) and see a live video feed.
 
-In addition to the camera, the device also provides a serial port over the same USB cable. This serial port prints diagnostic information and real-time results from a built-in fruit classifier - a small machine learning model running directly on the device that can identify apples, bananas, and strawberries in the camera's view.
+In addition to the camera, the device also provides a serial port over the same USB cable. This serial port prints diagnostic information and real-time results from a built-in fruit classifier - a small machine learning model running directly on the device that can identify apples, bananas, limes, and blueberries in the camera's view.
 
 The firmware also drives a 2x16 HD44780-compatible character LCD (sometimes written as "HD77480" in notes) to show startup status and live classification results directly on the device.
 
@@ -27,7 +27,7 @@ The system has five main components:
 
 3. **TinyUSB software stack** - Firmware running on the microcontroller that implements the USB Video Class (UVC) protocol, making the device appear as a standard webcam to any computer.
 
-4. **Fruit classifier model** - A quantized INT8 convolutional neural network trained on the Fruits-360 dataset and deployed directly onto the RP2350's flash memory. It runs on the microcontroller's second core, classifying each frame as apple, banana, strawberry, or background. The model was trained in Python using TensorFlow/Keras, quantized to INT8 for efficient inference on the Cortex-M33 with CMSIS-NN acceleration, and exported as a C array that is compiled into the firmware. See the [Fruit Classifier](#fruit-classifier) section for details on how the model was designed, trained, and deployed.
+4. **Fruit classifier model** - A quantized INT8 convolutional neural network trained on the Fruits-360 dataset and deployed directly onto the RP2350's flash memory. It runs on the microcontroller's second core, classifying each frame as apple, banana, lime, or blueberry. The model was trained in Python using TensorFlow/Keras, quantized to INT8 for efficient inference on the Cortex-M33 with CMSIS-NN acceleration, and exported as a C array that is compiled into the firmware. See the [Fruit Classifier](#fruit-classifier) section for details on how the model was designed, trained, and deployed.
 
 5. [**HD44780 LCD module**](https://www.adafruit.com/product/181) - A parallel 2-line text display used for local status. It shows boot progress messages, classifier startup state, and live class/confidence output so you can monitor the system without opening a serial terminal.
 
@@ -38,7 +38,7 @@ The data flow works as follows:
 - A DMA (Direct Memory Access) channel automatically moves the pixel data from the PIO hardware into a frame buffer in RAM, again without CPU involvement.
 - Once a complete frame arrives (signaled by the next VSYNC), the firmware swaps to a second frame buffer (double-buffering) so the camera can keep capturing while the previous frame is sent to the computer.
 - The USB stack packages the frame data into UVC bulk transfer packets and sends them to the host computer, where the operating system's built-in UVC driver receives them and makes the video available to applications.
-- Meanwhile, every 500 ms, the firmware sends the latest frame to the second CPU core, where the fruit classifier model runs inference. The on-device preprocessing converts the YUV422 camera data to 64×64 RGB, quantizes it to INT8, and feeds it through a 4-layer CNN - all without any network connection or cloud service. The classification result (e.g., "apple", confidence score) is printed over the serial port.
+- Meanwhile, every 500 ms, the firmware sends the latest frame to the second CPU core, where the fruit classifier model runs inference. The on-device preprocessing converts the YUV422 camera data to 100×100 RGB, quantizes it to INT8, and feeds it through a 4-layer CNN - all without any network connection or cloud service. The classification result (e.g., "apple", confidence score) is printed over the serial port.
 - In parallel, the LCD is updated with human-readable status: startup banners, camera/classifier readiness, and periodic inference output (class and score line, then raw score vector line).
 
 ## How to Set It Up
@@ -167,7 +167,7 @@ The camera outputs pixels in [YUV 4:2:2 format](https://en.wikipedia.org/wiki/Ch
 | SCL | 13 | I2C clock for register configuration |
 | RESET | 14 | Active-low reset |
 | PWDN | 15 | Power-down control (active high) |
-| XCLK | 21 | Master clock input (~12.5 MHz from MCU) |
+| XCLK | 23 | Master clock input (~12.5 MHz from MCU) |
 
 ### Configuration
 
@@ -227,7 +227,7 @@ The RP2350 uses three hardware subsystems working together to capture camera dat
 The RP2350's two Cortex-M33 cores are used for different tasks:
 
 - **Core 0** handles all I/O: camera initialization, USB stack processing (`tud_task()`), UVC frame transfers, CDC serial output, and dispatching frames to Core 1.
-- **Core 1** runs the TensorFlow Lite Micro inference engine. Every 500 ms, Core 0 signals Core 1 with a pointer to the latest frame buffer. Core 1 preprocesses the YUV data to RGB, downsamples to 64×64 pixels, quantizes to INT8, and runs the neural network. The result is passed back to Core 0 through shared variables.
+- **Core 1** runs the TensorFlow Lite Micro inference engine. Every 500 ms, Core 0 signals Core 1 with a pointer to the latest frame buffer. Core 1 preprocesses the YUV data to RGB, downsamples to 100×100 pixels, quantizes to INT8, and runs the neural network. The result is passed back to Core 0 through shared variables.
 
 ### HD44780 LCD Output (runtime behavior)
 
@@ -244,10 +244,10 @@ The firmware initializes the HD44780 in 4-bit mode and writes 16-character lines
    - Line 2: `has started!`
 - During live inference updates (about every 300 ms when new result is ready):
    - Line 1 format: `<class_name> (<confidence>)` (example: `banana (52)`)
-   - Line 2 format: `[s0,s1,s2,s3]` (raw INT8 scores for apple, banana, strawberry, background)
+   - Line 2 format: `[s0,s1,s2,s3]` (raw INT8 scores for apple, banana, lime, blueberry)
 
 The LCD interface in `hd44780.c` uses these GPIO pins on RP2350B:
-- `RW=24`, `EN=25`, `RS=26`, `DB4=27`, `DB5=28`, `DB6=29`, `DB7=30`
+- `RW=24`, `EN=25`, `RS=31`, `DB4=27`, `DB5=28`, `DB6=29`, `DB7=30`
 
 ### Overclocking
 
@@ -258,10 +258,10 @@ The system clock is set to 250 MHz (up from the default 150 MHz) by raising the 
 | Region | Size | Usage |
 |--------|------|-------|
 | Frame buffers | 76,800 bytes | 2× 38,400-byte YUY2 frame buffers for double-buffering |
-| TF Lite arena | 192,000 bytes | Tensor allocation for the ML model |
+| TF Lite arena | 327,680 bytes | Tensor allocation for the ML model (100×100 input model) |
 | Model weights | ~106 KB | Quantized INT8 neural network stored in flash, loaded to RAM |
 | Stack + other | ~25 KB | USB buffers, variables, stacks for both cores |
-| **Total RAM** | **~298 KB / 520 KB** | **56.8% utilization** |
+| **Total RAM** | **~430 KB / 520 KB** | **~82.7% utilization** |
 
 ## Software Components
 
@@ -351,7 +351,7 @@ See the [Fruit Classifier](#fruit-classifier) section below for full details on 
 
 ## Fruit Classifier
 
-The fruit classifier is an on-device machine learning model that identifies objects in the camera's view in real time, entirely on the microcontroller with no internet connection. It classifies each frame into one of four categories: **apple**, **banana**, **strawberry**, or **background** (anything that is not a fruit).
+The fruit classifier is an on-device machine learning model that identifies objects in the camera's view in real time, entirely on the microcontroller with no internet connection. It classifies each frame into one of four categories: **apple**, **banana**, **lime**, or **blueberry**.
 
 ### Why On-Device ML?
 
@@ -363,17 +363,17 @@ The model is a small convolutional neural network (CNN) designed to fit within t
 
 | Parameter | Value |
 |-----------|-------|
-| Input | 64×64×3 RGB, INT8 quantized |
-| Output | 4 classes (apple, banana, strawberry, background) |
+| Input | 100×100×3 RGB, INT8 quantized |
+| Output | 4 classes (apple, banana, lime, blueberry) |
 | Total parameters | 95,276 |
 | Model size | 106 KB (INT8 quantized) |
 | Inference time | ~200 ms at 250 MHz |
-| Tensor arena | 192 KB |
+| Tensor arena | 320 KB |
 
 The architecture has four convolutional blocks followed by a single dense classification layer:
 
 ```
-Input (64×64×3)
+Input (100×100×3)
   → Conv2D(24, 3×3) + BatchNorm + ReLU → MaxPool(2×2)    → 32×32×24
   → Conv2D(48, 3×3) + BatchNorm + ReLU → MaxPool(2×2)    → 16×16×48
   → Conv2D(64, 3×3) + BatchNorm + ReLU → MaxPool(2×2)    → 8×8×64
@@ -395,7 +395,7 @@ The training script handles the full workflow from dataset download to C header 
 
 The model is trained on the [Fruits-360](https://www.kaggle.com/datasets/moltean/fruits) dataset (v87), which contains 100×100 pixel images of various fruits on white backgrounds. The script downloads it automatically via `kagglehub`.
 
-The script maps Fruits-360 folder names to three fruit classes by prefix matching (e.g., all folders starting with "apple" map to the apple class, all starting with "banana" to banana, etc.).
+The script maps Fruits-360 folder names to four fruit classes by prefix matching (apple, banana, lime, blueberry). For apples, only red-apple variants are included in training.
 
 #### 2. Class Balancing
 
@@ -403,16 +403,9 @@ Fruits-360 has very uneven class sizes (e.g., ~4,900 apple images vs. ~323 banan
 - Caps each fruit class at **2,000 images** maximum (random subsampling)
 - Applies **sklearn class weights** during training so that underrepresented classes contribute more to the loss
 
-#### 3. Background Class Generation
+#### 3. Class Availability Validation
 
-The Fruits-360 dataset has no "background" class. To teach the model to output "background" for non-fruit inputs (walls, desks, faces, etc.), the script generates synthetic background images:
-- Uniform solid colors
-- Random noise
-- Gradients with noise
-- Stripe patterns
-- Random rectangles on colored backgrounds
-
-About 1/3 of the total dataset is background images (up to 1,500 samples), giving the model a strong negative class.
+The script validates that all configured classes (apple, banana, lime, blueberry) were found in the selected Fruits-360 split before training proceeds. If any class has zero samples, training aborts with a clear error.
 
 #### 4. Domain-Gap Augmentation
 
@@ -433,7 +426,7 @@ The model is trained for 50 epochs with:
 - **Class weights** - Computed via sklearn to compensate for class imbalance
 - **80/20 train/validation split** - Shuffled before splitting
 
-Best observed validation accuracy: **96.1%**.
+Validation accuracy depends on the exact train/validation split and random seed.
 
 #### 6. INT8 Quantization
 
@@ -443,7 +436,7 @@ After training, the model is converted to a fully INT8-quantized TensorFlow Lite
 - Both inputs and outputs are INT8 (not just weights) - this enables CMSIS-NN accelerated kernels on the Cortex-M33
 - The `TFLITE_BUILTINS_INT8` op set is enforced, ensuring every operation runs in integer arithmetic
 
-The quantized model is 106 KB, small enough to store in flash and load into the 192 KB tensor arena with room for intermediate activations.
+The quantized model is about 106 KB, stored in flash and run with a 320 KB tensor arena on-device.
 
 #### 7. C Header Export
 
@@ -458,7 +451,7 @@ This header is compiled directly into the firmware - no filesystem or file loadi
 
 The firmware-side inference wrapper handles the pipeline from raw camera data to classification result:
 
-1. **YUV-to-RGB conversion** - The 160×120 YUY2 frame from the camera is downsampled to 64×64 and converted to RGB using BT.601 color matrix math. Each pixel is independently converted:
+1. **YUV-to-RGB conversion** - The 160×120 YUY2 frame from the camera is downsampled to 100×100 and converted to RGB using BT.601 color matrix math. Each pixel is independently converted:
    - Extract Y, U, V values from the interleaved YUY2 stream
    - Apply the standard YUV→RGB conversion: R = 1.164(Y-16) + 1.596(V-128), etc.
    - Clamp to [0, 255]
@@ -469,9 +462,9 @@ The firmware-side inference wrapper handles the pipeline from raw camera data to
 
 4. **Result extraction** - The output tensor's 4 INT8 values are compared; the index with the highest value determines the class. The result struct includes the class name, confidence score, and all 4 raw scores for debugging.
 
-### Class Selection History
+### Class Selection Notes
 
-The original design included orange as a class instead of strawberry. However, the OV7670's limited color accuracy at 160×120 made orange and apple nearly indistinguishable - both appeared as similar reddish-orange blobs after YUV-to-RGB conversion. Orange was replaced with strawberry, which has a distinct shape and texture pattern that the model can reliably differentiate from apple even at low resolution.
+The current model targets **apple (red varieties only), banana, lime, and blueberry**. This matches the training script's class mapping and the generated model metadata used by firmware at runtime.
 
 ## ROC and AUC Analysis
 
