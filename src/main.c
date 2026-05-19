@@ -2,19 +2,16 @@
 #include <string.h>
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
-#include "hardware/sync.h"
 #include "hardware/i2c.h"
 #include "hardware/dma.h"
 #include "hardware/pio.h"
 #include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
-#include "hardware/vreg.h"
 #include "tusb.h"
 #include "usb_descriptors.h"
 #include "ov7670_regs.h"
 #include "camera_capture.pio.h"
-#include "fruit_classifier.h"
 
 // --- Pin Definitions ---
 #define PIN_D0      0
@@ -25,7 +22,7 @@
 #define PIN_SCL     13
 #define PIN_RESET   14
 #define PIN_PWDN    15
-#define PIN_XCLK    23
+#define PIN_XCLK    21
 
 #define CAM_I2C     i2c0
 
@@ -46,24 +43,12 @@ static int dma_chan = -1;
 // --- UVC state ---
 static volatile unsigned tx_busy = 0;
 static unsigned frame_num = 0;
-static unsigned already_sent = 0;
-static unsigned interval_ms = 1000 / FRAME_RATE;
-static uint32_t tx_start_ms = 0;  // when current transfer started
 
 // --- Debug counters ---
 static volatile uint32_t dbg_vsync_fall = 0;
 static volatile uint32_t dbg_vsync_rise = 0;
 static volatile uint32_t dbg_frames_sent = 0;
 static volatile uint32_t dbg_frames_ready = 0;
-
-// --- ML inference state (core 1) ---
-static volatile bool ml_frame_pending = false;     // core0 signals core1
-static volatile uint8_t ml_buf_idx = 0;            // which buffer to classify
-static volatile bool ml_result_ready = false;       // core1 signals result
-static volatile fruit_result_t ml_last_result = {0};
-static volatile uint32_t ml_inference_count = 0;
-static volatile int ml_init_status = 0;            // 0=pending, 1=ok, -1=fail
-static volatile uint32_t ml_arena_used = 0;
 
 // =====================================================================
 // I2C / SCCB helpers
@@ -119,9 +104,9 @@ static void cam_write_list(const ov7670_reg_t *list) {
 // =====================================================================
 // OV7670 frame control for QQVGA (from usedbytes driver)
 // =====================================================================
-static void cam_frame_control_qqvga(void) {
-    // QQVGA = SIZE_DIV4 (index 2): vstart=11, hstart=186, edge_offset=2, pclk_delay=2
-    uint8_t size = 2; // DIV4 → 160x120
+static void cam_frame_control_qvga(void) {
+    // QVGA = SIZE_DIV2 (index 1): vstart=11, hstart=186, edge_offset=2, pclk_delay=2
+    uint8_t size = 1; // DIV2
     uint8_t vstart = 11;
     uint16_t hstart = 186;
     uint8_t edge_offset = 2;
@@ -144,7 +129,7 @@ static void cam_frame_control_qqvga(void) {
     cam_write_reg(OV7670_REG_SCALING_PCLK_DIV, pclk_div_val);
 
     // Digital zoom
-    uint8_t zoom = 0x48; // for DIV4
+    uint8_t zoom = 0x24; // for DIV2
     uint8_t xsc = cam_read_reg(OV7670_REG_SCALING_XSC);
     uint8_t ysc = cam_read_reg(OV7670_REG_SCALING_YSC);
     xsc = (xsc & 0x80) | zoom;
@@ -233,8 +218,8 @@ static bool cam_init(void) {
     // Write main init table
     cam_write_list(ov7670_init_regs);
 
-    // Set QQVGA frame size (160x120)
-    cam_frame_control_qqvga();
+    // Set QVGA frame size
+    cam_frame_control_qvga();
 
     sleep_ms(300); // settling time
 
@@ -317,56 +302,29 @@ static void capture_init(void) {
 // =====================================================================
 // UVC video streaming
 // =====================================================================
-
-// Pick a frame buffer to send — prefer the latest ready buffer,
-// but always have *something* even if no new frame arrived yet.
-static uint8_t pick_send_buf(void) {
-    uint32_t save = save_and_disable_interrupts();
-    uint8_t idx = ready_buf_idx;
-    frame_ready = false;
-    restore_interrupts(save);
-    return idx;
-}
-
 static void video_send_frame(void) {
     if (!tud_video_n_streaming(0, 0)) {
-        already_sent = 0;
         frame_num = 0;
-        tx_busy = 0;
-        return;
-    }
-
-    // Timeout: if tx_busy stuck for >500ms, force-clear it
-    if (tx_busy) {
-        uint32_t now = to_ms_since_boot(get_absolute_time());
-        if (now - tx_start_ms > 500) {
-            tx_busy = 0;
-        }
-    }
-
-    // First frame: send immediately when streaming starts
-    if (!already_sent) {
-        already_sent = 1;
-        tx_busy = 1;
-        tx_start_ms = to_ms_since_boot(get_absolute_time());
-        uint8_t idx = pick_send_buf();
-        dbg_frames_sent++;
-        if (!tud_video_n_frame_xfer(0, 0, (void*)frame_buf[idx], FRAME_BYTES)) {
-            tx_busy = 0;
-        }
         return;
     }
 
     if (tx_busy) return;
     if (!frame_ready) return;
 
-    tx_busy = 1;
-    tx_start_ms = to_ms_since_boot(get_absolute_time());
-    uint8_t idx = pick_send_buf();
-    dbg_frames_sent++;
-    if (!tud_video_n_frame_xfer(0, 0, (void*)frame_buf[idx], FRAME_BYTES)) {
-        tx_busy = 0;
+    // Critical section: atomically grab ready buffer and set tx_busy
+    // to prevent VSYNC ISR from swapping buffers between these steps
+    uint32_t save = save_and_disable_interrupts();
+    if (!frame_ready || tx_busy) {
+        restore_interrupts(save);
+        return;
     }
+    uint8_t idx = ready_buf_idx;
+    frame_ready = false;
+    tx_busy = 1;
+    restore_interrupts(save);
+
+    dbg_frames_sent++;
+    tud_video_n_frame_xfer(0, 0, (void*)frame_buf[idx], FRAME_BYTES);
 }
 
 void tud_video_frame_xfer_complete_cb(uint_fast8_t ctl_idx, uint_fast8_t stm_idx) {
@@ -380,13 +338,7 @@ int tud_video_commit_cb(uint_fast8_t ctl_idx, uint_fast8_t stm_idx,
                         video_probe_and_commit_control_t const *parameters) {
     (void)ctl_idx;
     (void)stm_idx;
-    // Read the negotiated frame interval (in 100ns units) and convert to ms
-    interval_ms = parameters->dwFrameInterval / 10000;
-    if (interval_ms < 10) interval_ms = 10;  // Clamp to reasonable minimum
-    // Reset streaming state for new session
-    frame_num = 0;
-    tx_busy = 0;
-    already_sent = 0;
+    (void)parameters;
     return VIDEO_ERROR_NONE;
 }
 
@@ -409,63 +361,13 @@ void tud_resume_cb(void) {
 }
 
 // =====================================================================
-// Core 1: ML inference loop
-// =====================================================================
-static void core1_ml_entry(void) {
-    // No printf on Core 1 — it interleaves with Core 0 CDC output.
-    // Use shared flags to report status back to Core 0.
-
-    if (!fruit_classifier_init()) {
-        ml_init_status = -1;  // signal failure to Core 0
-        while (1) { tight_loop_contents(); }
-    }
-
-    ml_arena_used = 0; // could read from interpreter if exposed
-    ml_init_status = 1;  // signal success to Core 0
-
-    while (1) {
-        if (!ml_frame_pending) {
-            tight_loop_contents();
-            continue;
-        }
-
-        // Run classification on the indicated frame buffer
-        fruit_result_t result;
-        uint8_t idx = ml_buf_idx;
-        ml_frame_pending = false;
-
-        if (fruit_classifier_run(frame_buf[idx], FRAME_WIDTH, FRAME_HEIGHT, &result)) {
-            ml_last_result = result;
-            ml_result_ready = true;
-            ml_inference_count++;
-        }
-    }
-}
-
-void hd44780_init();
-void hd44780_display_line1(const char *text);
-void hd44780_display_line2(const char *text);
-
-// =====================================================================
-// Main (Core 0: camera + USB + dispatch to Core 1)
+// Main
 // =====================================================================
 int main(void) {
-    // Overclock to 250 MHz for faster ML inference
-    vreg_set_voltage(VREG_VOLTAGE_1_20);
-    sleep_ms(10);
-    set_sys_clock_khz(250000, true);
-
-    // Initialize LCD
-    sleep_ms(100);
-    hd44780_init();
-    hd44780_display_line1("Hi! I'm Proton!");
-    hd44780_display_line2("I identify fruit");
-
     stdio_init_all();
     sleep_ms(2000); // let CDC connect
 
-    printf("\n=== OV7670 UVC Camera + Fruit Classifier ===\n");
-    printf("System clock: %lu MHz\n", clock_get_hz(clk_sys) / 1000000);
+    printf("\n=== OV7670 UVC Camera ===\n");
 
     // Initialize camera
     if (!cam_init()) {
@@ -473,82 +375,26 @@ int main(void) {
         while (1) { tight_loop_contents(); }
     }
 
-    hd44780_display_line1("My camera is");
-    hd44780_display_line2("initialized!");
-    sleep_ms(1000);
-
     // Initialize PIO + DMA capture
     capture_init();
 
-    // Launch Core 1 for ML inference
-    multicore_launch_core1(core1_ml_entry);
-    printf("Core 1 launched for ML inference\n");
-
-    printf("Entering main loop...\n"); 
+    printf("Entering main loop...\n");
 
     uint32_t last_status = 0;
-    uint32_t last_ml_frame = 0;
-    uint32_t last_lcd_update = 0;
-    bool ml_init_reported = false;
     while (1) {
         tud_task();
         video_send_frame();
 
-        // Keep calling tud_task() frequently — do NOT let printf or
-        // other work starve the USB stack.
-        tud_task();
-
         uint32_t now = to_ms_since_boot(get_absolute_time());
-
-        // Report Core 1 ML init status once
-        if (!ml_init_reported && ml_init_status != 0) {
-            if (ml_init_status == 1) {
-                printf("[Core1] Fruit classifier initialized OK\n");
-                hd44780_display_line1("Fruit classifier");
-                hd44780_display_line2("has started!");
-            } else {
-                printf("[Core1] ERROR: classifier init FAILED\n");
-            }
-            ml_init_reported = true;
-        }
-
-        // Dispatch a frame to Core 1 for classification every ~500ms.
-        if (now - last_ml_frame >= 500 && !ml_frame_pending
-            && ml_init_status == 1 && dbg_frames_ready > 0) {
-            ml_buf_idx = ready_buf_idx;
-            ml_frame_pending = true;
-            last_ml_frame = now;
-        }
-
-        // Only print status when CDC is connected, and less frequently
-        // during active streaming to avoid stalling the main loop.
-        uint32_t status_interval = tud_video_n_streaming(0, 0) ? 5000 : 2000;
-        if (now - last_status >= status_interval) {
+        if (now - last_status >= 2000) {
             last_status = now;
-            if (tud_cdc_connected()) {
-                uint32_t dma_remaining = dma_channel_hw_addr(dma_chan)->transfer_count;
-                printf("VSYNC f/r=%lu/%lu ready=%lu sent=%lu "
-                       "tx_busy=%u streaming=%d dma_rem=%lu\n",
-                       dbg_vsync_fall, dbg_vsync_rise, dbg_frames_ready, dbg_frames_sent,
-                       tx_busy, tud_video_n_streaming(0, 0), dma_remaining);
-            }
-        }
-
-        if (ml_result_ready && (now - last_lcd_update >= 300)) {
-            char buf[16];
-            sprintf(buf, "%s (%d)",
-                ml_last_result.class_name,
-                ml_last_result.confidence);
-            hd44780_display_line1(buf);
-            printf("%s\n", buf);
-            sprintf(buf, "[%d,%d,%d,%d]",
-                ml_last_result.scores[0], ml_last_result.scores[1],
-                ml_last_result.scores[2], ml_last_result.scores[3]);
-            hd44780_display_line2(buf);
-            printf("%s\n", buf);
-
-            ml_result_ready = false;
-            last_lcd_update = now;
+            uint32_t dma_remaining = dma_channel_hw_addr(dma_chan)->transfer_count;
+            printf("VSYNC f/r=%lu/%lu ready=%lu sent=%lu "
+                   "tx_busy=%u streaming=%d dma_rem=%lu buf[0..3]=%02X %02X %02X %02X\n",
+                   dbg_vsync_fall, dbg_vsync_rise, dbg_frames_ready, dbg_frames_sent,
+                   tx_busy, tud_video_n_streaming(0, 0), dma_remaining,
+                   frame_buf[ready_buf_idx][0], frame_buf[ready_buf_idx][1],
+                   frame_buf[ready_buf_idx][2], frame_buf[ready_buf_idx][3]);
         }
     }
 }
