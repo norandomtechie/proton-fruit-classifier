@@ -19,6 +19,7 @@ The script will:
 
 import os
 import sys
+import json
 import numpy as np
 
 # Suppress TF warnings
@@ -35,6 +36,8 @@ BATCH_SIZE = 32
 EPOCHS = 50
 MODEL_PATH = "fruit_model.tflite"
 HEADER_PATH = os.path.join(os.path.dirname(__file__), "include", "fruit_model.h")
+ROC_PLOT_PATH = os.path.join(os.path.dirname(__file__), "roc_curves.png")
+ROC_METRICS_PATH = os.path.join(os.path.dirname(__file__), "roc_auc_metrics.json")
 
 CLASS_NAMES = ["apple", "banana", "lime", "blueberry"]
 
@@ -248,6 +251,50 @@ def quantize_model(model, representative_data):
     return tflite_model
 
 
+def compute_and_save_roc(model, val_x, val_y):
+    """Compute one-vs-rest ROC/AUC and save plot + JSON metrics."""
+    from sklearn.metrics import roc_curve, auc
+    from sklearn.preprocessing import label_binarize
+    import matplotlib.pyplot as plt
+
+    # Model outputs logits; softmax converts to per-class probabilities for ROC.
+    logits = model.predict(val_x, batch_size=BATCH_SIZE, verbose=0)
+    probs = tf.nn.softmax(logits, axis=1).numpy()
+
+    y_bin = label_binarize(val_y, classes=list(range(NUM_CLASSES)))
+    auc_by_class = {}
+
+    plt.figure(figsize=(8, 6))
+    for i, class_name in enumerate(CLASS_NAMES):
+        fpr, tpr, _ = roc_curve(y_bin[:, i], probs[:, i])
+        class_auc = auc(fpr, tpr)
+        auc_by_class[class_name] = float(class_auc)
+        plt.plot(fpr, tpr, linewidth=2, label=f"{class_name} (AUC={class_auc:.3f})")
+
+    # Random-chance reference line
+    plt.plot([0, 1], [0, 1], 'k--', linewidth=1)
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("ROC Curves (One-vs-Rest)")
+    plt.legend(loc="lower right")
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(ROC_PLOT_PATH, dpi=160)
+    plt.close()
+
+    with open(ROC_METRICS_PATH, "w", encoding="utf-8") as f:
+        json.dump(auc_by_class, f, indent=2)
+
+    print(f"ROC plot saved to {ROC_PLOT_PATH}")
+    print(f"ROC AUC metrics saved to {ROC_METRICS_PATH}")
+    for class_name in CLASS_NAMES:
+        print(f"  AUC[{class_name}]: {auc_by_class[class_name]:.4f}")
+
+    return auc_by_class
+
+
 def export_c_header(tflite_model, header_path):
     """Export TFLite model as a C header file."""
     os.makedirs(os.path.dirname(header_path), exist_ok=True)
@@ -356,6 +403,10 @@ def main():
     # Evaluate
     val_loss, val_acc = model.evaluate(val_ds, verbose=0)
     print(f"\nValidation accuracy: {val_acc:.3f}")
+
+    # ROC/AUC on validation split
+    print("\nComputing ROC/AUC curves...")
+    compute_and_save_roc(model, val_x, val_y)
 
     # Quantize
     print("\nQuantizing model to INT8...")

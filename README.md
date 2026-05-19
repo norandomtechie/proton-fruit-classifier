@@ -475,17 +475,18 @@ The original design included orange as a class instead of strawberry. However, t
 
 ## ROC and AUC Analysis
 
-The fruit classifier model was evaluated using Receiver Operating Characteristic (ROC) curves and Area Under the Curve (AUC) metrics. These metrics provide insight into the model's performance across different classification thresholds.
+The training script now computes one-vs-rest ROC curves on the validation split and writes both:
+
+- `training/roc_curves.png` (plot image)
+- `training/roc_auc_metrics.json` (per-class AUC values)
+
+This runs automatically at the end of `training/train_fruit_model.py`.
 
 ### Results
 
-- **ROC Curves**: The ROC curves for each class (apple, banana, lime, blueberry) are shown below.
-- **AUC Scores**:
-  - Apple: 0.95
-  - Banana: 0.93
-  - Lime: 0.92
-  - Blueberry: 0.94
+- **ROC Curves**: Generated for each class (apple, banana, lime, blueberry).
+- **AUC Scores**: Read from `training/roc_auc_metrics.json` after training.
 
-![ROC Curves](./roc_curves.png)
+![ROC Curves](./training/roc_curves.png)
 
-The high AUC scores indicate that the model performs well in distinguishing between the classes.
+To refresh the figure and metrics, rerun the training script.
