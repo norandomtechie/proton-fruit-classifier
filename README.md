@@ -359,6 +359,15 @@ See the [Fruit Classifier](#fruit-classifier) section below for full details on 
 
 The fruit classifier is an on-device machine learning model that identifies objects in the camera's view in real time, entirely on the microcontroller with no internet connection. It classifies each frame into one of four categories: **apple**, **banana**, **lime**, or **blueberry**.
 
+<img src="apple.png>" style="width: 200px;">  
+
+<img src="banana.png>" style="width: 200px;">  
+
+<img src="lime.png>" style="width: 200px;">  
+
+<img src="blueberry.png>" style="width: 200px;">  
+
+
 ### Why On-Device ML?
 
 Running classification directly on the RP2350 means the device is self-contained. There is no need for a server, cloud API, or even a computer - the microcontroller captures a frame, preprocesses it, runs the neural network, and reports the result, all within about 200 ms. This makes the system suitable for embedded applications where connectivity is unavailable or latency is critical.
