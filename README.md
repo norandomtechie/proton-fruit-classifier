@@ -359,13 +359,13 @@ See the [Fruit Classifier](#fruit-classifier) section below for full details on 
 
 The fruit classifier is an on-device machine learning model that identifies objects in the camera's view in real time, entirely on the microcontroller with no internet connection. It classifies each frame into one of four categories: **apple**, **banana**, **lime**, or **blueberry**.
 
-<img src="apple.png>" width="200">  
+<img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/apple.png>" width="200">  
 
-<img src="banana.png>" width="200">  
+<img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/banana.png>" width="200">  
 
-<img src="lime.png>" width="200">  
+<img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/lime.png>" width="200">  
 
-<img src="blueberry.png>" width="200">  
+<img src="https://raw.githubusercontent.com/norandomtechie/proton-fruit-classifier/main/blueberry.png>" width="200">  
 
 
 ### Why On-Device ML?
