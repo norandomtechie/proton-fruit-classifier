@@ -59,14 +59,14 @@ Use 3.3 V power and 3.3 V logic for the camera.  Add 10k pullups on the I2C pins
 | D5 | 5 | Pixel data bit 5 |
 | D6 | 6 | Pixel data bit 6 |
 | D7 | 7 | Pixel data bit 7 |
-| PCLK | 8 | Pixel clock |
-| HREF | 9 | Horizontal reference |
-| VSYNC | 10 | Vertical sync |
+| PLK | 8 | Pixel clock |
+| HS | 9 | Horizontal reference |
+| VS | 10 | Vertical sync |
 | SDA / SIOD | 12 | I2C data |
 | SCL / SIOC | 13 | I2C clock |
 | RESET | 14 | Active-low reset |
 | PWDN | 15 | Power-down control |
-| XCLK | 23 | Camera master clock from Proton |
+| XLK | 23 | Camera master clock from Proton |
 | 3V3 | Any 3V3 pin | Camera power |
 | GND | Any GND pin | Common ground |
 
