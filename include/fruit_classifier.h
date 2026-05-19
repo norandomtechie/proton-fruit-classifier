@@ -9,12 +9,12 @@ extern "C" {
 #endif
 
 // Model input dimensions
-#define FRUIT_INPUT_SIZE   64
+#define FRUIT_INPUT_SIZE   100
 #define FRUIT_NUM_CLASSES  4
 
 // Classification result
 typedef struct {
-    int class_id;           // 0=apple, 1=banana, 2=orange, 3=background
+    int class_id;           // 0=apple, 1=banana, 2=lime, 3=blueberry
     const char *class_name; // human-readable label
     int8_t confidence;      // raw INT8 output score (higher = more confident)
     int8_t scores[FRUIT_NUM_CLASSES]; // all class scores for debugging
@@ -25,7 +25,7 @@ typedef struct {
 bool fruit_classifier_init(void);
 
 // Run inference on a 160x120 YUY2 frame buffer.
-// Internally downsamples to 48x48 grayscale and runs the model.
+// Internally downsamples to 100x100 RGB and runs the model.
 // Result is written to *result.
 // Returns true on success.
 bool fruit_classifier_run(const uint8_t *yuy2_frame, uint16_t width, uint16_t height,

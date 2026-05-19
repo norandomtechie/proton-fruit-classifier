@@ -29,9 +29,10 @@ static inline void TfLiteTensorDataFree(TfLiteTensor* t) { (void)t; }
 #include "pico/stdlib.h"
 #include <cstring>
 
-// Tensor arena — model needs ~70-100 KB for a 4-layer CNN with 48x48 input.
-// Align to 16 bytes for CMSIS-NN.
-static constexpr int kTensorArenaSize = 192 * 1024;
+// Tensor arena for the 100x100 RGB model.
+// 192 KB is too small for this graph (AllocateTensors requests ~300 KB).
+// Keep some headroom while staying within RP2350 SRAM budget.
+static constexpr int kTensorArenaSize = 320 * 1024;
 alignas(16) static uint8_t tensor_arena[kTensorArenaSize];
 
 // Scratch buffer for downsampled RGB image
@@ -48,7 +49,8 @@ static uint32_t last_inference_us = 0;
 // Op resolver — only include ops used by our model
 static tflite::MicroMutableOpResolver<8> resolver;
 
-static const char *class_names[] = {"apple", "banana", "strawberry", "background"};
+static_assert(FRUIT_INPUT_SIZE == FRUIT_MODEL_INPUT_SIZE,
+              "FRUIT_INPUT_SIZE must match model input size");
 
 // =====================================================================
 // Image preprocessing: YUY2 → NxN RGB INT8 (3 channels)
@@ -181,7 +183,7 @@ extern "C" bool fruit_classifier_run(const uint8_t *yuy2_frame, uint16_t width, 
     }
 
     result->class_id = best_idx;
-    result->class_name = class_names[best_idx];
+    result->class_name = fruit_class_names[best_idx];
     result->confidence = best_score;
     for (int i = 0; i < FRUIT_NUM_CLASSES; i++) {
         result->scores[i] = output[i];

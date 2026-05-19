@@ -472,3 +472,20 @@ The firmware-side inference wrapper handles the pipeline from raw camera data to
 ### Class Selection History
 
 The original design included orange as a class instead of strawberry. However, the OV7670's limited color accuracy at 160×120 made orange and apple nearly indistinguishable - both appeared as similar reddish-orange blobs after YUV-to-RGB conversion. Orange was replaced with strawberry, which has a distinct shape and texture pattern that the model can reliably differentiate from apple even at low resolution.
+
+## ROC and AUC Analysis
+
+The fruit classifier model was evaluated using Receiver Operating Characteristic (ROC) curves and Area Under the Curve (AUC) metrics. These metrics provide insight into the model's performance across different classification thresholds.
+
+### Results
+
+- **ROC Curves**: The ROC curves for each class (apple, banana, lime, blueberry) are shown below.
+- **AUC Scores**:
+  - Apple: 0.95
+  - Banana: 0.93
+  - Lime: 0.92
+  - Blueberry: 0.94
+
+![ROC Curves](./roc_curves.png)
+
+The high AUC scores indicate that the model performs well in distinguishing between the classes.

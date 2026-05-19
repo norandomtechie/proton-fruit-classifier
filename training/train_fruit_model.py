@@ -3,11 +3,11 @@
 Train a small fruit classification CNN and export as quantized TFLite model + C array.
 
 Target: RP2350B (520 KB SRAM, 16 MB flash) with OV7670 camera (160x120 YUY2).
-Model input: 64x64 RGB INT8 (3 channels).
-Classes: apple, banana, strawberry, background (4 classes).
+Model input: 100x100 RGB INT8 (3 channels).
+Classes: apple, banana, lime, blueberry (4 classes).
 
 Usage:
-    pip install tensorflow numpy Pillow kagglehub
+    pip install tensorflow numpy Pillow kagglehub scikit-learn matplotlib
     python train_fruit_model.py
 
 The script will:
@@ -29,27 +29,39 @@ from tensorflow import keras
 from tensorflow.keras import layers
 
 # --- Configuration ---
-IMG_SIZE = 64          # Model input: 64x64
-NUM_CLASSES = 4        # apple, banana, orange, background
+IMG_SIZE = 100          # Model input: 100x100
+NUM_CLASSES = 4        # apple, banana, lime, blueberry
 BATCH_SIZE = 32
 EPOCHS = 50
 MODEL_PATH = "fruit_model.tflite"
 HEADER_PATH = os.path.join(os.path.dirname(__file__), "include", "fruit_model.h")
 
-CLASS_NAMES = ["apple", "banana", "strawberry", "background"]
+CLASS_NAMES = ["apple", "banana", "lime", "blueberry"]
 
-# Fruits-360 class folder name prefixes (case-insensitive match)
+# Fruits-360 class folder name prefixes (case-insensitive startswith match)
 FRUIT360_PREFIXES = {
-    "apple":  ["apple"],
+    # Red apples only (exclude green/golden/pink/yellow variants)
+    "apple": [
+        "apple red 1",
+        "apple red 2",
+        "apple red 3",
+        "apple red delicious 1",
+        "apple_red_1",
+        "apple_red_2",
+        "apple_red_3",
+        "apple_red_delicious_1",
+        "apple_red_delicios_1",
+    ],
     "banana": ["banana"],
-    "strawberry": ["strawberry"],
+    "lime": ["lime"],
+    "blueberry": ["blueberry"],
 }
 
 
 def build_model():
     """Build a CNN suitable for MCU deployment with more capacity."""
     model = keras.Sequential([
-        # Input: 64x64x3 RGB (color needed to distinguish orange from apple)
+        # Input: 100x100x3 RGB
         layers.Input(shape=(IMG_SIZE, IMG_SIZE, 3)),
 
         # Block 1: 24 filters
@@ -93,6 +105,12 @@ def download_fruits360():
 
 def find_training_dir(base_dir):
     """Find the Training directory within the Fruits-360 dataset."""
+    # Prefer the 100x100 split from Fruits-360. It has richer class coverage
+    # (including Limes/Blueberry) and already matches our configured input size.
+    preferred = os.path.join(base_dir, "fruits-360_100x100", "fruits-360", "Training")
+    if os.path.isdir(preferred):
+        return preferred
+
     for root, dirs, files in os.walk(base_dir):
         if os.path.basename(root) == "Training":
             return root
@@ -159,39 +177,13 @@ def load_fruits360(data_dir):
     labels = balanced_labels
     print(f"  After balancing (max {max_per_class}/class): {len(images)} fruit images")
 
-    # Generate "background" class from diverse non-fruit content (3-channel)
-    n_bg = min(len(images) // 3, 1500)
-    print(f"  Generating {n_bg} background samples")
-    for i in range(n_bg):
-        choice = i % 5
-        if choice == 0:
-            # Uniform color
-            bg = np.random.randint(0, 256, (1, 1, 3)).astype(np.float32)
-            bg = np.broadcast_to(bg, (IMG_SIZE, IMG_SIZE, 3)).copy()
-        elif choice == 1:
-            # Random noise
-            bg = np.random.randint(0, 256, (IMG_SIZE, IMG_SIZE, 3)).astype(np.float32)
-        elif choice == 2:
-            # Gradient
-            grad = np.linspace(0, 255, IMG_SIZE).reshape(-1, 1, 1)
-            bg = np.broadcast_to(grad, (IMG_SIZE, IMG_SIZE, 3)).astype(np.float32).copy()
-            bg += np.random.randn(IMG_SIZE, IMG_SIZE, 3).astype(np.float32) * 20
-        elif choice == 3:
-            # Edges / high-frequency pattern
-            bg = np.zeros((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
-            bg[::2, :, :] = 255.0
-        else:
-            # Random rectangles
-            base_color = np.random.randint(50, 200, (3,)).astype(np.float32)
-            bg = np.ones((IMG_SIZE, IMG_SIZE, 3), dtype=np.float32) * base_color
-            for _ in range(np.random.randint(1, 5)):
-                x1, y1 = np.random.randint(0, IMG_SIZE, 2)
-                x2, y2 = np.random.randint(0, IMG_SIZE, 2)
-                x1, x2 = min(x1, x2), max(x1, x2)
-                y1, y2 = min(y1, y2), max(y1, y2)
-                bg[y1:y2, x1:x2, :] = np.random.randint(0, 256, (3,))
-        images.append(bg)
-        labels.append(3)  # background
+    # Validate all configured classes are represented.
+    class_counts = {name: sum(1 for l in labels if l == idx) for idx, name in enumerate(CLASS_NAMES)}
+    missing = [name for name, count in class_counts.items() if count == 0]
+    if missing:
+        print(f"ERROR: Missing images for classes: {', '.join(missing)}")
+        print("Check FRUIT360_PREFIXES and dataset contents.")
+        sys.exit(1)
 
     images = np.array(images, dtype=np.float32) / 255.0
     labels = np.array(labels, dtype=np.int32)
